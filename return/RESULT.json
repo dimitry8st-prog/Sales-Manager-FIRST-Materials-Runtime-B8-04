@@ -1,0 +1,31 @@
+{
+  "assignment": "B8-04",
+  "issued_revision": "R3",
+  "status": "CP1_COMPLETE_NOT_ACCEPTED",
+  "ready_for_full_acceptance": false,
+  "source_commit": "600c57b0c1c0b97880d844383471c72a9cef4f23",
+  "python": "3.12.14",
+  "checks": {
+    "own_tests": {
+      "status": "PASS",
+      "count": 40
+    },
+    "CP0": "PASS",
+    "CP1": {
+      "status": "PASS",
+      "cases": 19
+    },
+    "CP2": "NOT_RUN",
+    "CP3": "NOT_RUN",
+    "CP4": "NOT_RUN"
+  },
+  "integration_status": "NOT_CONNECTED",
+  "real_outbound": false,
+  "blockers": [
+    "No disposable PostgreSQL DSN supplied; PG_GATE exits 3.",
+    "acceptance_pg.py adapter is absent in the reviewed repository.",
+    "CP3 integration and CP4 independent installed audit remain open."
+  ],
+  "api_exact_bytes_sha256": "6e2386bfe77e5b00dc2a7cd06b75c7279951008d2b12c8bf027e1a6776019481",
+  "api_utf8_lf_sha256": "b96fb261a4bea7be5cc1b8e2e82a1a9d37a478f9868db574db339f5d68384691"
+}

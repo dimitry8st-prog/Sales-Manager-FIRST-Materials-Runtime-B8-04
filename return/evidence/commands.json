@@ -1,0 +1,88 @@
+{
+  "checked_at_utc": "2026-10-17T14:50:30.098799+00:00",
+  "python": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+  "source_commit": "600c57b0c1c0b97880d844383471c72a9cef4f23",
+  "commands": [
+    {
+      "check": "unit",
+      "argv": [
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/first_materials_runtime",
+        "-p",
+        "test_*.py",
+        "-v"
+      ],
+      "cwd": "/workspace/scratch/8febe5931947/tmp/b804-repo-review",
+      "env_overrides": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "solution"
+      },
+      "exit_code": 0,
+      "log": "return/evidence/unit.log",
+      "status": "PASS"
+    },
+    {
+      "check": "cp0",
+      "argv": [
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python",
+        "-B",
+        "ACCEPTANCE_RUNNER.py",
+        "cp0"
+      ],
+      "cwd": "/workspace/scratch/8febe5931947/tmp/b804-repo-review",
+      "env_overrides": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "solution"
+      },
+      "exit_code": 0,
+      "log": "return/evidence/cp0.log",
+      "status": "PASS"
+    },
+    {
+      "check": "cp1",
+      "argv": [
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python",
+        "-B",
+        "ACCEPTANCE_RUNNER.py",
+        "cp1",
+        "--module",
+        "first_materials_runtime.api"
+      ],
+      "cwd": "/workspace/scratch/8febe5931947/tmp/b804-repo-review",
+      "env_overrides": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "solution"
+      },
+      "exit_code": 0,
+      "log": "return/evidence/cp1.log",
+      "status": "PASS"
+    },
+    {
+      "check": "cp2",
+      "argv": [
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python",
+        "-B",
+        "PG_GATE.py",
+        "--module",
+        "first_materials_runtime",
+        "--schema",
+        "b8_accept_review_20261017",
+        "--phase",
+        "before_restart"
+      ],
+      "cwd": "/workspace/scratch/8febe5931947/tmp/b804-repo-review",
+      "env_overrides": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "solution"
+      },
+      "exit_code": 3,
+      "log": "return/evidence/cp2.log",
+      "status": "NOT_RUN"
+    }
+  ]
+}
