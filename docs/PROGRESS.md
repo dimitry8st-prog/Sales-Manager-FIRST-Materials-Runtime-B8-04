@@ -42,16 +42,16 @@ SHA-256 api.py в UTF-8/LF:
 
 ## Публикация после CP1
 
-Текущий `solution/first_materials_runtime/api.py` заменяет снимок 15:22. Рядом лежит `tests/first_materials_runtime/test_api.py`. Архив задания не менялся.
+Текущий `solution/first_materials_runtime/api.py` заменяет снимок 15:22. Рядом лежит `tests/first_materials_runtime/test_api.py`. Добавлена обработка доверенных доменных и транспортных ошибок, а отказы после материализации теперь гарантированно покидают транзакцию и откатывают staging. Архив задания не менялся.
 
 Проверено в тот же день из корня рабочего пакета, Git Bash, Python 3.12:
 
-- собственные тесты: 33 теста, OK;
+- собственные тесты: 40 тестов, OK;
 - `ACCEPTANCE_RUNNER.py cp1 --module first_materials_runtime.api`: 19 кейсов PASS, код выхода 0. Стенд закончил строкой `CP1 SYNTHETIC COMPONENT CASES PASS; real PG/installed gates NOT_RUN`.
 
 CP2, CP3 и CP4 не запускались. Реальные отправки, рабочая база и деплой не выполнялись. CP1 не закрывает всё задание.
 
 SHA-256 текущего api.py в UTF-8/LF:
-a677d62f8c0b264be873a5164545d9171bdebc7e71a6db0b8a97f69d714c62c2
+6e2386bfe77e5b00dc2a7cd06b75c7279951008d2b12c8bf027e1a6776019481
 
 Хеш `11442b19…` выше относится только к снимку 15:22.
