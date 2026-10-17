@@ -1,0 +1,2698 @@
+diff --git a/solution/first_materials_runtime/__init__.py b/solution/first_materials_runtime/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/solution/first_materials_runtime/acceptance_pg.py b/solution/first_materials_runtime/acceptance_pg.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..35a8106627bc645032f885cba43efa556c718a9d
+--- /dev/null
++++ b/solution/first_materials_runtime/acceptance_pg.py
+@@ -0,0 +1,301 @@
++"""Изолированный PostgreSQL-адаптер для CP2 B8-04.
++
++Он хранит только собственное транзакционное состояние wrapper-а. Внешние
++F129/F130/F115-владельцы остаются синтетическими портами стенда до CP3.
++"""
++
++from __future__ import annotations
++
++import copy
++import json
++import re
++from pathlib import Path
++
++from .api import create_service as create_materials_service
++
++
++_SCHEMA_RE = re.compile(r"b8_accept_[a-z0-9_]{1,40}\Z")
++_MIGRATION = Path(__file__).with_name("migrations") / "0001.sql"
++
++
++def _schema_identifier(schema):
++    if type(schema) is not str or _SCHEMA_RE.fullmatch(schema) is None:
++        raise ValueError("isolated b8_accept_* schema required")
++
++    from psycopg import sql
++
++    return sql.Identifier(schema)
++
++
++def _scope_key(scope):
++    return json.dumps(
++        scope,
++        ensure_ascii=False,
++        sort_keys=True,
++        separators=(",", ":"),
++        allow_nan=False,
++    )
++
++
++def _json(value):
++    return json.dumps(
++        value,
++        ensure_ascii=False,
++        sort_keys=True,
++        separators=(",", ":"),
++        allow_nan=False,
++    )
++
++
++def initialize(connect_factory, schema):
++    """Создаём только собственную схему и таблицы B8-04."""
++    from psycopg import sql
++
++    identifier = _schema_identifier(schema)
++    template = _MIGRATION.read_text(encoding="utf-8")
++    statement = sql.SQL(template).format(schema=identifier)
++
++    connection = connect_factory()
++    try:
++        connection.execute(statement)
++        connection.commit()
++    except BaseException:
++        connection.rollback()
++        raise
++    finally:
++        connection.close()
++
++
++def seed(connect_factory, schema, fixture):
++    """Загружаем выданный synthetic seed перед before_restart."""
++    from psycopg import sql
++
++    initialize(connect_factory, schema)
++    identifier = _schema_identifier(schema)
++    scope = fixture["fixture_scope"]
++    scope_key = _scope_key(scope)
++    state = fixture.get("seed", {})
++
++    connection = connect_factory()
++    try:
++        connection.execute(
++            sql.SQL("DELETE FROM {}.state").format(identifier)
++        )
++        connection.execute(
++            sql.SQL("DELETE FROM {}.scope_locks").format(identifier)
++        )
++        connection.execute(
++            sql.SQL(
++                "INSERT INTO {}.scope_locks(scope_key) VALUES (%s)"
++            ).format(identifier),
++            (scope_key,),
++        )
++        for bucket, rows in state.items():
++            for item_key, value in rows.items():
++                connection.execute(
++                    sql.SQL(
++                        "INSERT INTO {}.state"
++                        "(scope_key,bucket,item_key,value) "
++                        "VALUES (%s,%s,%s,%s::jsonb)"
++                    ).format(identifier),
++                    (scope_key, bucket, item_key, _json(value)),
++                )
++        connection.commit()
++    except BaseException:
++        connection.rollback()
++        raise
++    finally:
++        connection.close()
++
++
++class PostgresTransaction:
++    """Одна транзакция с явной последовательностью запросов внутри scope."""
++
++    def __init__(self, owner, scope):
++        self.owner = owner
++        self.scope_key = _scope_key(scope)
++        self.connection = None
++        self._delegate_state = None
++        self._delegate_writes = None
++
++    def __enter__(self):
++        from psycopg import sql
++
++        if self.owner._active is not None:
++            raise RuntimeError("nested B8-04 transactions are forbidden")
++
++        self.connection = self.owner.connect_factory()
++        try:
++            # READ COMMITTED здесь намеренно сочетается с FOR UPDATE.
++            # Ожидающий запрос после снятия блокировки обязан увидеть replay,
++            # который только что зафиксировал первый запрос. SERIALIZABLE
++            # сохранил бы старый snapshot и завершился SerializationFailure.
++            self.connection.execute(
++                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
++            )
++            self.connection.execute(
++                sql.SQL(
++                    "INSERT INTO {}.scope_locks(scope_key) VALUES (%s) "
++                    "ON CONFLICT(scope_key) DO NOTHING"
++                ).format(self.owner.identifier),
++                (self.scope_key,),
++            )
++            self.connection.execute(
++                sql.SQL(
++                    "SELECT scope_key FROM {}.scope_locks "
++                    "WHERE scope_key=%s FOR UPDATE"
++                ).format(self.owner.identifier),
++                (self.scope_key,),
++            ).fetchone()
++        except BaseException as error:
++            try:
++                self.connection.rollback()
++            finally:
++                self.connection.close()
++            self.connection = None
++            if type(error).__module__.startswith("psycopg"):
++                raise ConnectionError(
++                    "PostgreSQL transaction could not be opened"
++                ) from error
++            raise
++
++        delegate = self.owner.delegate
++        if hasattr(delegate, "state"):
++            self._delegate_state = copy.deepcopy(delegate.state)
++        if hasattr(delegate, "writes"):
++            self._delegate_writes = len(delegate.writes)
++        self.owner._active = self
++        return self
++
++    def __exit__(self, exc_type, exc, tb):
++        connection = self.connection
++        self.owner._active = None
++        try:
++            if exc_type is not None:
++                try:
++                    connection.rollback()
++                except Exception as rollback_error:
++                    raise TimeoutError(
++                        "transaction rollback outcome is unknown"
++                    ) from rollback_error
++                self._restore_delegate()
++                return False
++
++            try:
++                connection.commit()
++            except Exception as commit_error:
++                self._restore_delegate()
++                raise TimeoutError(
++                    "transaction commit outcome is unknown"
++                ) from commit_error
++            return False
++        finally:
++            connection.close()
++            self.connection = None
++
++    def _restore_delegate(self):
++        delegate = self.owner.delegate
++        if self._delegate_state is not None:
++            delegate.state = copy.deepcopy(self._delegate_state)
++        if self._delegate_writes is not None:
++            del delegate.writes[self._delegate_writes:]
++
++    def get(self, bucket, key):
++        from psycopg import sql
++
++        row = self._execute(
++            sql.SQL(
++                "SELECT value FROM {}.state "
++                "WHERE scope_key=%s AND bucket=%s AND item_key=%s"
++            ).format(self.owner.identifier),
++            (self.scope_key, bucket, key),
++        ).fetchone()
++        return copy.deepcopy(row[0]) if row is not None else None
++
++    def put(self, bucket, key, value):
++        from psycopg import sql
++
++        self._execute(
++            sql.SQL(
++                "INSERT INTO {}.state"
++                "(scope_key,bucket,item_key,value) "
++                "VALUES (%s,%s,%s,%s::jsonb) "
++                "ON CONFLICT(scope_key,bucket,item_key) "
++                "DO UPDATE SET value=excluded.value"
++            ).format(self.owner.identifier),
++            (self.scope_key, bucket, key, _json(value)),
++        )
++
++    def remove(self, bucket, key):
++        from psycopg import sql
++
++        self._execute(
++            sql.SQL(
++                "DELETE FROM {}.state "
++                "WHERE scope_key=%s AND bucket=%s AND item_key=%s"
++            ).format(self.owner.identifier),
++            (self.scope_key, bucket, key),
++        )
++
++    def scan(self, bucket):
++        from psycopg import sql
++
++        rows = self._execute(
++            sql.SQL(
++                "SELECT item_key,value FROM {}.state "
++                "WHERE scope_key=%s AND bucket=%s ORDER BY item_key"
++            ).format(self.owner.identifier),
++            (self.scope_key, bucket),
++        ).fetchall()
++        return [(key, copy.deepcopy(value)) for key, value in rows]
++
++    def _execute(self, statement, parameters):
++        """DB-сбой в теле откатится и станет публичной ошибкой зависимости."""
++        try:
++            return self.connection.execute(statement, parameters)
++        except Exception as error:
++            if type(error).__module__.startswith("psycopg"):
++                raise ConnectionError("PostgreSQL statement failed") from error
++            raise
++
++
++class PostgresPorts:
++    """Сохраняем поведение harness ports, заменяя только state backend."""
++
++    def __init__(self, connect_factory, schema, delegate):
++        self.connect_factory = connect_factory
++        self.schema = schema
++        self.identifier = _schema_identifier(schema)
++        self.delegate = delegate
++        self.auth = delegate.auth
++        self._active = None
++
++    def transaction(self, scope):
++        return PostgresTransaction(self, scope)
++
++    def call(self, name, request):
++        if self._active is None:
++            raise RuntimeError("dependency call outside transaction")
++
++        writes = getattr(self.delegate, "writes", None)
++        before = len(writes) if writes is not None else 0
++        result = self.delegate.call(name, request)
++
++        if writes is not None:
++            for bucket, key, value in writes[before:]:
++                if value is None:
++                    self._active.remove(bucket, key)
++                else:
++                    self._active.put(bucket, key, value)
++        return result
++
++    def __getattr__(self, name):
++        return getattr(self.delegate, name)
++
++
++def create_service(connect_factory, schema, ports):
++    """Подключаем настоящую MaterialsService к PostgreSQL state backend."""
++    initialize(connect_factory, schema)
++    return create_materials_service(
++        PostgresPorts(connect_factory, schema, ports)
++    )
+diff --git a/solution/first_materials_runtime/api.py b/solution/first_materials_runtime/api.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a4650b3660e160268d54c7187b503214f59493f
+--- /dev/null
++++ b/solution/first_materials_runtime/api.py
+@@ -0,0 +1,744 @@
++"""Подготовка утверждённых материалов: компонент B8-04."""
++
++import hashlib
++import json
++import sys
++from typing import Any, ContextManager, cast
++from uuid import UUID
++
++
++# Точный набор полей для каждой операции.
++REQUEST_FIELDS = {
++    "prepare": {
++        "scope", "request_id", "event_id",
++        "catalog_version", "kind",
++    },
++    "prepare_initial": {
++        "scope", "request_id", "candidate_ref",
++        "assessment_ref", "catalog_version",
++    },
++}
++
++SCOPE_FIELDS = {
++    "client_id", "campaign_id", "lead_id",
++    "mailbox_ref", "thread_id",
++}
++
++# Только эти исключения принадлежат исходным доменным компонентам,
++# которые стоят за портами B8-04. Одного атрибута ``code`` недостаточно:
++# произвольная ошибка зависимости не должна превращаться в INVALID.
++TRUSTED_DOMAIN_ERRORS = {
++    ("sales_discovery_qualification", "QualificationError"),
++    ("reference_source.sales_discovery_qualification", "QualificationError"),
++    ("sales_template_materialization", "TemplateMaterializationError"),
++    ("reference_source.sales_template_materialization", "TemplateMaterializationError"),
++    ("sales_language_registry", "LanguageRegistryError"),
++    ("reference_source.sales_language_registry", "LanguageRegistryError"),
++    ("sales_action_locale", "ActionLocaleError"),
++    ("reference_source.sales_action_locale", "ActionLocaleError"),
++    ("sales_rules", "RuleViolation"),
++    ("reference_source.sales_rules", "RuleViolation"),
++}
++
++TRANSPORT_ERRORS = (TimeoutError, ConnectionError)
++
++
++def valid_id(value):
++    """Проверяем строковый идентификатор по правилам контракта."""
++    return (
++        type(value) is str
++        and 1 <= len(value) <= 128
++        and value == value.strip()
++        and all(
++            ord(char) >= 32 and ord(char) != 127
++            for char in value
++        )
++    )
++
++
++def valid_revision(value):
++    """Ревизия — неотрицательное целое число, но не bool."""
++    return type(value) is int and value >= 0
++
++
++def valid_request(operation, request):
++    """Проверяем операцию, поля запроса и значения scope."""
++    if type(operation) is not str:
++        return False
++
++    if operation not in REQUEST_FIELDS:
++        return False
++
++    if type(request) is not dict:
++        return False
++
++    # Запрещаем пропущенные и дополнительные поля.
++    if set(request) != REQUEST_FIELDS[operation]:
++        return False
++
++    scope = request["scope"]
++    if type(scope) is not dict or set(scope) != SCOPE_FIELDS:
++        return False
++
++    for field in SCOPE_FIELDS:
++        value = scope[field]
++
++        if field == "thread_id" and operation == "prepare_initial":
++            # До первого сообщения provider thread отсутствует.
++            if value is not None:
++                return False
++        elif not valid_id(value):
++            return False
++
++    # Campaign ID: UUID в каноническом нижнем регистре.
++    try:
++        if str(UUID(scope["campaign_id"])) != scope["campaign_id"]:
++            return False
++    except ValueError:
++        return False
++
++    for field in REQUEST_FIELDS[operation] - {"scope"}:
++        if not valid_id(request[field]):
++            return False
++
++    if operation == "prepare":
++        if request["kind"] not in ("PRODUCT_INFO", "PRESENTATION"):
++            return False
++
++    return True
++
++
++def material_error(material):
++    """Возвращаем код ошибки или None для корректного описания."""
++    if (
++        type(material) is not dict
++        or set(material) != {
++            "material_ref", "sha256", "approved_fact_ids"
++        }
++    ):
++        return "INVALID_MATERIAL_DESCRIPTOR"
++
++    if not valid_id(material["material_ref"]):
++        return "INVALID_MATERIAL_DESCRIPTOR"
++
++    # Проверяем формат SHA-256, а не содержимое самого материала.
++    digest = material["sha256"]
++    if (
++        type(digest) is not str
++        or len(digest) != 64
++        or any(char not in "0123456789abcdef" for char in digest)
++    ):
++        return "INVALID_HASH"
++
++    facts = material["approved_fact_ids"]
++    if type(facts) is not list:
++        return "INVALID_MATERIAL_DESCRIPTOR"
++
++    if not all(valid_id(fact) for fact in facts):
++        return "INVALID_MATERIAL_DESCRIPTOR"
++
++    # Повторяющиеся идентификаторы фактов запрещены.
++    if len(set(facts)) != len(facts):
++        return "INVALID_MATERIAL_DESCRIPTOR"
++
++    return None
++
++
++def save_response_error(saved, material_ref):
++    """Код ошибки ответа materials.save или None."""
++    if (
++        type(saved) is not dict
++        or set(saved) != {"material_ref"}
++        or not valid_id(saved["material_ref"])
++    ):
++        return "INVALID_SAVE_RESPONSE"
++
++    # Сохранённая ссылка должна совпасть с переданным описанием.
++    if saved["material_ref"] != material_ref:
++        return "MATERIAL_REF_MISMATCH"
++
++    return None
++
++
++def request_fingerprint(request):
++    """Одинаковый запрос всегда даёт один и тот же отпечаток."""
++    raw = json.dumps(
++        request,
++        ensure_ascii=False,
++        sort_keys=True,
++        separators=(",", ":"),
++        allow_nan=False,
++    ).encode("utf-8")
++    return hashlib.sha256(raw).hexdigest()
++
++
++def replay_key(request):
++    """Ключ повтора: scope и request_id, без текста письма."""
++    return json.dumps(
++        [request["scope"], request["request_id"]],
++        ensure_ascii=False,
++        sort_keys=True,
++        separators=(",", ":"),
++        allow_nan=False,
++    )
++
++
++def stored_result(tx, request):
++    """REPLAY для того же запроса и CONFLICT, если байты изменились."""
++    stored = tx.get("replay", replay_key(request))
++    if stored is None:
++        return None
++
++    if (
++        type(stored) is dict
++        and stored.get("fingerprint") == request_fingerprint(request)
++        and type(stored.get("data")) is dict
++    ):
++        return {
++            "status": "REPLAY",
++            "data": dict(stored["data"]),
++        }
++
++    return {
++        "status": "CONFLICT",
++        "data": {},
++    }
++
++
++def qualification_error(value):
++    """Код ошибки ответа квалификации или None."""
++    verdicts = (
++        "QUALIFIED_FOR_PREPARATION",
++        "NOT_QUALIFIED",
++        "NEEDS_REVIEW",
++    )
++    if (
++        type(value) is not dict
++        or set(value) != {
++            "verdict", "qualification_ref", "reason_codes"
++        }
++        or value["verdict"] not in verdicts
++        or not valid_id(value["qualification_ref"])
++    ):
++        return "INVALID_QUALIFICATION_RESPONSE"
++
++    reasons = value["reason_codes"]
++    if (
++        type(reasons) is not list
++        or not all(type(item) is str for item in reasons)
++    ):
++        return "INVALID_QUALIFICATION_RESPONSE"
++
++    return None
++
++
++def dispatch_response_error(value):
++    """Код ошибки ответа dispatch.propose или None."""
++    if (
++        type(value) is not dict
++        or set(value) != {"action_id", "state"}
++        or not valid_id(value["action_id"])
++        or value["state"] != "PREPARED"
++    ):
++        return "INVALID_DISPATCH_RESPONSE"
++
++    return None
++
++
++class DependencyUnavailable(RuntimeError):
++    """Обязательная зависимость недоступна."""
++
++
++class InvalidPortResponse(Exception):
++    """Неверный ответ зависимости. Исключение выходит из транзакции и откатывает её."""
++
++    def __init__(self, code: str):
++        super().__init__(code)
++        self.code = code
++
++
++class TransactionResponse(Exception):
++    """Публичный отказ, который сначала должен откатить транзакцию."""
++
++    def __init__(self, status: str, data: dict[str, Any]):
++        super().__init__(status)
++        self.status = status
++        self.data = data
++
++
++def trusted_domain_code(error):
++    """Возвращаем код только для известного класса исходного компонента."""
++    identity = (
++        type(error).__module__,
++        type(error).__name__,
++    )
++    if identity not in TRUSTED_DOMAIN_ERRORS:
++        return None
++
++    module = sys.modules.get(identity[0])
++    trusted_type = getattr(module, identity[1], None)
++    if type(error) is not trusted_type:
++        return None
++
++    code = getattr(error, "code", None)
++    if not valid_id(code):
++        return None
++    return code
++
++
++class MaterialsService:
++    def __init__(self, ports: Any):
++        # Доверенные зависимости передаются снаружи.
++        self.ports = ports
++
++    def execute(self, operation, request):
++        # 1. Проверяем входные данные до авторизации.
++        if not valid_request(operation, request):
++            return {
++                "status": "INVALID",
++                "data": {"code": "INVALID_REQUEST"},
++            }
++
++        # 2. Получаем сведения о пользователе из доверенных ports.
++        auth = getattr(self.ports, "auth", None)
++        if (
++            type(auth) is not dict
++            or auth.get("authenticated") is not True
++        ):
++            return {
++                "status": "UNAUTHENTICATED",
++                "data": {},
++            }
++
++        # 3. Проверяем разрешение на подготовку материалов.
++        capabilities = auth.get("capabilities", [])
++        if (
++            type(capabilities) is not list
++            or not (
++                "materials.prepare" in capabilities
++                or "*" in capabilities
++            )
++        ):
++            return {
++                "status": "UNAUTHORIZED",
++                "data": {},
++            }
++
++        # 4. Запрещаем доступ к данным другого клиента.
++        if auth.get("client_id") != request["scope"]["client_id"]:
++            return {
++                "status": "UNAUTHORIZED",
++                "data": {},
++            }
++
++        # 5. Проверяем наличие интерфейса транзакций.
++        transaction = getattr(self.ports, "transaction", None)
++        call = getattr(self.ports, "call", None)
++        if not callable(transaction) or not callable(call):
++            return {
++                "status": "DEPENDENCY_UNAVAILABLE",
++                "data": {},
++            }
++
++        # 6. Работаем с состоянием в пределах заданного scope.
++        body_error = None
++        body_finished = False
++        try:
++            context = cast(
++                ContextManager[Any],
++                transaction(request["scope"]),
++            )
++            with context as tx:
++                try:
++                    result = self._execute_in_transaction(
++                        tx, operation, request
++                    )
++                except BaseException as error:
++                    # Нужна именно личность объекта: если после него наружу
++                    # вышла другая транспортная ошибка, откат/commit неясен.
++                    body_error = error
++                    raise
++                body_finished = True
++            return result
++        except PermissionError:
++            return {
++                "status": "UNAUTHORIZED",
++                "data": {},
++            }
++        except DependencyUnavailable:
++            return {
++                "status": "DEPENDENCY_UNAVAILABLE",
++                "data": {},
++            }
++        except InvalidPortResponse as error:
++            # Откат уже выполнен: исключение вышло из контекста транзакции.
++            return {
++                "status": "INVALID",
++                "data": {"code": error.code},
++            }
++        except TransactionResponse as response:
++            return {
++                "status": response.status,
++                "data": dict(response.data),
++            }
++        except TRANSPORT_ERRORS as error:
++            if error is body_error:
++                # Контекст уже успешно обработал исключение из тела,
++                # следовательно откат подтверждён.
++                return {
++                    "status": "DEPENDENCY_UNAVAILABLE",
++                    "data": {},
++                }
++
++            if body_finished or body_error is not None:
++                # Ошибка пришла из __exit__: результат commit/rollback
++                # неизвестен. Разрешено только чтение, но не повтор эффектов.
++                self._reread_after_uncertain_commit(request)
++                return {
++                    "status": "UNKNOWN",
++                    "data": {"request_id": request["request_id"]},
++                }
++
++            # Создать или открыть транзакцию не удалось; эффектов ещё нет.
++            return {
++                "status": "DEPENDENCY_UNAVAILABLE",
++                "data": {},
++            }
++
++    def _call(self, name, request):
++        """Вызываем зависимость через доверенный интерфейс."""
++        call = getattr(self.ports, "call", None)
++        if not callable(call):
++            raise DependencyUnavailable(name)
++
++        try:
++            return call(name, request)
++        except Exception as exc:
++            # Так выданный стенд сообщает об отсутствии зависимости.
++            if type(exc).__name__ == "MissingDependency":
++                raise DependencyUnavailable(name) from exc
++
++            code = trusted_domain_code(exc)
++            if code is not None:
++                raise InvalidPortResponse(code) from exc
++
++            # Остальные ошибки не маскируем.
++            raise
++
++    def _reread_after_uncertain_commit(self, request):
++        """Проверяем scoped replay без повторения внешних эффектов."""
++        transaction = getattr(self.ports, "transaction", None)
++        if not callable(transaction):
++            return
++
++        try:
++            context = cast(
++                ContextManager[Any],
++                transaction(request["scope"]),
++            )
++            with context as tx:
++                stored_result(tx, request)
++        except Exception:
++            # Повторное чтение диагностическое: UNKNOWN остаётся UNKNOWN.
++            return
++
++    def _execute_in_transaction(self, tx, operation, request):
++        """Проверяем состояние, каталог, событие и материал."""
++        authority = tx.get("authority", "current")
++        catalog = tx.get("catalog", "current")
++
++        # Отсутствующие данные нельзя заменять выдуманными.
++        if authority is None or catalog is None:
++            return {
++                "status": "DEPENDENCY_UNAVAILABLE",
++                "data": {},
++            }
++
++        if (
++            type(authority) is not dict
++            or type(catalog) is not dict
++            or not valid_revision(authority.get("revision"))
++            or not valid_revision(catalog.get("revision"))
++            or not valid_id(catalog.get("version"))
++        ):
++            return {
++                "status": "INVALID",
++                "data": {"code": "INVALID_STATE"},
++            }
++
++        # Остановка и передача человеку блокируют автоматизацию.
++        if authority.get("status") in (
++            "STOPPED", "HUMAN", "HANDED_OFF"
++        ):
++            return {
++                "status": "BLOCKED",
++                "data": {},
++            }
++
++        if authority.get("status") != "ACTIVE":
++            return {
++                "status": "INVALID",
++                "data": {"code": "INVALID_STATE"},
++            }
++
++        # Повтор узнаём до новых вызовов каталога, сохранения и очереди.
++        stored = stored_result(tx, request)
++        if stored is not None:
++            return stored
++
++        if catalog["version"] != request["catalog_version"]:
++            return {
++                "status": "STALE",
++                "data": {},
++            }
++
++        authority_version = authority.get("catalog_version")
++        if (
++            authority_version is not None
++            and authority_version != request["catalog_version"]
++        ):
++            return {
++                "status": "STALE",
++                "data": {},
++            }
++
++        # Запрашиваем именно нужную версию каталога.
++        resolved = self._call("catalog.resolve", {
++            "scope": request["scope"],
++            "version": request["catalog_version"],
++        })
++
++        if (
++            type(resolved) is not dict
++            or set(resolved) != {
++                "version", "bundle_ref", "approved"
++            }
++        ):
++            return {
++                "status": "INVALID",
++                "data": {"code": "INVALID_CATALOG_RESPONSE"},
++            }
++
++        if (
++            not valid_id(resolved["version"])
++            or not valid_id(resolved["bundle_ref"])
++            or type(resolved["approved"]) is not bool
++        ):
++            return {
++                "status": "INVALID",
++                "data": {"code": "INVALID_CATALOG_RESPONSE"},
++            }
++
++        # Другая версия не может подменить запрошенную.
++        if resolved["version"] != request["catalog_version"]:
++            return {
++                "status": "INVALID",
++                "data": {"code": "CATALOG_VERSION_MISMATCH"},
++            }
++
++        if not resolved["approved"]:
++            return {
++                "status": "BLOCKED",
++                "data": {},
++            }
++
++        if operation == "prepare":
++            # Читаем событие только из указанного диалога.
++            event = self._call("d1.event", {
++                "scope": request["scope"],
++                "event_id": request["event_id"],
++            })
++
++            if type(event) is not dict:
++                return {
++                    "status": "INVALID",
++                    "data": {"code": "INVALID_EVENT_RESPONSE"},
++                }
++
++            if event.get("event_id") != request["event_id"]:
++                return {
++                    "status": "INVALID",
++                    "data": {"code": "EVENT_ID_MISMATCH"},
++                }
++
++            if "scope" in event and event["scope"] != request["scope"]:
++                return {
++                    "status": "INVALID",
++                    "data": {"code": "SCOPE_MISMATCH"},
++                }
++
++            # При неполной истории автоматический ответ запрещён.
++            if event.get("coverage_complete") is not True:
++                return {
++                    "status": "BLOCKED",
++                    "data": {},
++                }
++
++            # INTEREST не разрешает продолжать автоматическую продажу.
++            if event.get("kind") != "HUMAN_QUESTION":
++                return {
++                    "status": "BLOCKED",
++                    "data": {},
++                }
++
++            # Подготовку выполняет существующий компонент F129.
++            material = self._call("f129.materialize", {
++                "scope": request["scope"],
++                "event": event,
++                "catalog_version": request["catalog_version"],
++                "kind": request["kind"],
++            })
++
++            # Проверяем точный формат описания материала.
++            code = material_error(material)
++            if code is not None:
++                raise InvalidPortResponse(code)
++            material = cast(dict[str, Any], material)
++            # Материал может использовать только разрешённые факты.
++            allowed_facts = event.get("approved_fact_ids")
++            if (
++                type(allowed_facts) is not list
++                or not all(valid_id(fact) for fact in allowed_facts)
++            ):
++                raise InvalidPortResponse("FACT_SCOPE_MISMATCH")
++
++            if not set(material["approved_fact_ids"]).issubset(
++                set(allowed_facts)
++            ):
++                raise InvalidPortResponse("FACT_SCOPE_MISMATCH")
++
++            # Списки фактов сохраняют исходный порядок.
++            return self._save_and_propose(
++                tx,
++                request,
++                material,
++                request["kind"],
++                {
++                    "request_id": request["request_id"],
++                    "material_ref": material["material_ref"],
++                    "catalog_version": request["catalog_version"],
++                },
++                authority,
++                catalog,
++            )
++
++        qualification = self._call("f129.qualify", {
++            "scope": request["scope"],
++            "candidate_ref": request["candidate_ref"],
++            "assessment_ref": request["assessment_ref"],
++            "catalog_version": request["catalog_version"],
++        })
++        code = qualification_error(qualification)
++        if code is not None:
++            raise InvalidPortResponse(code)
++        qualification = cast(dict[str, Any], qualification)
++
++        # Без допуска к подготовке материал не сохраняем и не ставим в очередь.
++        if qualification["verdict"] != "QUALIFIED_FOR_PREPARATION":
++            return {
++                "status": "BLOCKED",
++                "data": {"verdict": qualification["verdict"]},
++            }
++
++        material = self._call("f130.materialize_initial", {
++            "scope": request["scope"],
++            "qualification_ref": qualification["qualification_ref"],
++            "catalog_version": request["catalog_version"],
++        })
++        code = material_error(material)
++        if code is not None:
++            raise InvalidPortResponse(code)
++        material = cast(dict[str, Any], material)
++
++        return self._save_and_propose(
++            tx,
++            request,
++            material,
++            "INITIAL_OUTREACH",
++            {
++                "request_id": request["request_id"],
++                "material_ref": material["material_ref"],
++                "catalog_version": request["catalog_version"],
++                "verdict": "QUALIFIED_FOR_PREPARATION",
++            },
++            authority,
++            catalog,
++        )
++
++    def _ensure_state_unchanged(
++        self, tx, authority, catalog, request
++    ):
++        """Повторно проверяем STOP и версию перед необратимым этапом."""
++        current_authority = tx.get("authority", "current")
++        current_catalog = tx.get("catalog", "current")
++
++        if type(current_authority) is dict and current_authority.get(
++            "status"
++        ) in ("STOPPED", "HUMAN", "HANDED_OFF"):
++            raise TransactionResponse("BLOCKED", {})
++
++        if (
++            current_authority != authority
++            or current_catalog != catalog
++            or type(current_catalog) is not dict
++            or current_catalog.get("version")
++            != request["catalog_version"]
++        ):
++            raise TransactionResponse("STALE", {})
++
++    def _save_and_propose(
++        self, tx, request, material, kind, data, authority, catalog
++    ):
++        """Сохраняем исходный descriptor и ставим действие в очередь."""
++        material_ref = material["material_ref"]
++        self._ensure_state_unchanged(
++            tx, authority, catalog, request
++        )
++        saved = self._call("materials.save", {
++            "scope": request["scope"],
++            "request_id": request["request_id"],
++            "material": material,
++        })
++        code = save_response_error(saved, material_ref)
++        if code is not None:
++            # Выход исключением откатывает транзакцию.
++            raise InvalidPortResponse(code)
++
++        self._ensure_state_unchanged(
++            tx, authority, catalog, request
++        )
++
++        proposed = self._call("dispatch.propose", {
++            "scope": request["scope"],
++            "action_id": request["request_id"],
++            "kind": kind,
++            "payload_ref": material_ref,
++        })
++        code = dispatch_response_error(proposed)
++        if code is not None:
++            raise InvalidPortResponse(code)
++
++        # В повтор кладём описание и исходные идентификаторы, не текст письма.
++        tx.put("replay", replay_key(request), {
++            "fingerprint": request_fingerprint(request),
++            "scope": request["scope"],
++            "request_id": request["request_id"],
++            "catalog_version": request["catalog_version"],
++            "material": {
++                "material_ref": material["material_ref"],
++                "sha256": material["sha256"],
++                "approved_fact_ids": list(
++                    material["approved_fact_ids"]
++                ),
++            },
++            "data": data,
++        })
++        return {
++            "status": "OK",
++            "data": data,
++        }
++
++
++def create_service(ports):
++    """Точка подключения, предусмотренная контрактом."""
++    return MaterialsService(ports)
+diff --git a/solution/first_materials_runtime/migrations/0001.sql b/solution/first_materials_runtime/migrations/0001.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad52a1b33f5dff3ae91be44ce769d3b4de86536c
+--- /dev/null
++++ b/solution/first_materials_runtime/migrations/0001.sql
+@@ -0,0 +1,24 @@
++CREATE SCHEMA IF NOT EXISTS {schema};
++
++CREATE TABLE IF NOT EXISTS {schema}.scope_locks (
++    scope_key text PRIMARY KEY,
++    CONSTRAINT scope_locks_scope_key_nonempty
++        CHECK (char_length(scope_key) BETWEEN 2 AND 4096)
++);
++
++CREATE TABLE IF NOT EXISTS {schema}.state (
++    scope_key text NOT NULL,
++    bucket text NOT NULL,
++    item_key text NOT NULL,
++    value jsonb NOT NULL,
++    PRIMARY KEY (scope_key, bucket, item_key),
++    CONSTRAINT state_scope_key_nonempty
++        CHECK (char_length(scope_key) BETWEEN 2 AND 4096),
++    CONSTRAINT state_bucket_identifier
++        CHECK (
++            char_length(bucket) BETWEEN 1 AND 128
++            AND bucket = btrim(bucket)
++        ),
++    CONSTRAINT state_item_key_nonempty
++        CHECK (char_length(item_key) BETWEEN 1 AND 4096)
++);
+diff --git a/tests/first_materials_runtime/test_acceptance_pg.py b/tests/first_materials_runtime/test_acceptance_pg.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..622de1554922d9497eb172a1a60bf00e67fa2cae
+--- /dev/null
++++ b/tests/first_materials_runtime/test_acceptance_pg.py
+@@ -0,0 +1,247 @@
++"""Дополнительные CP2-проверки на настоящем PostgreSQL."""
++
++import copy
++import json
++import os
++import threading
++import time
++import unittest
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++
++
++@unittest.skipUnless(
++    os.environ.get("B8_TEST_DSN"),
++    "B8_TEST_DSN is required for real PostgreSQL tests",
++)
++class PostgresAcceptanceTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        import psycopg
++
++        from ACCEPTANCE_RUNNER import Ports
++        from first_materials_runtime import acceptance_pg
++
++        cls.psycopg = psycopg
++        cls.Ports = Ports
++        cls.pg = acceptance_pg
++        cls.dsn = os.environ["B8_TEST_DSN"]
++        cls.base_schema = os.environ.get(
++            "B8_TEST_SCHEMA", "b8_accept_b804_component"
++        )
++        fixtures = json.loads(
++            (ROOT / "acceptance" / "fixtures.json").read_text(
++                encoding="utf-8"
++            )
++        )
++        cls.fixture = next(
++            item for item in fixtures
++            if item["name"] == "approved_presentation"
++        )
++
++    def connect(self):
++        return self.psycopg.connect(self.dsn)
++
++    def schema(self, suffix):
++        return f"{self.base_schema}_{suffix}"
++
++    def state_count(self, schema, scope, bucket=None):
++        from psycopg import sql
++
++        scope_key = self.pg._scope_key(scope)
++        query = sql.SQL(
++            "SELECT count(*) FROM {}.state WHERE scope_key=%s"
++        ).format(sql.Identifier(schema))
++        params = [scope_key]
++        if bucket is not None:
++            query += sql.SQL(" AND bucket=%s")
++            params.append(bucket)
++        with self.connect() as connection:
++            return connection.execute(query, params).fetchone()[0]
++
++    def test_dependency_staging_rolls_back_with_invalid_material(self):
++        fixture = copy.deepcopy(self.fixture)
++        fixture["responses"]["f129.materialize"]["sha256"] = "wrong"
++        fixture["effects"] = {
++            "f129.materialize": {
++                "staging": {"draft": {"partial": True}}
++            }
++        }
++        schema = self.schema("rollback")
++        self.pg.seed(self.connect, schema, fixture)
++        ports = self.Ports(fixture)
++        service = self.pg.create_service(self.connect, schema, ports)
++
++        result = service.execute(fixture["operation"], fixture["request"])
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "INVALID_HASH"},
++        })
++        self.assertEqual(
++            self.state_count(
++                schema, fixture["fixture_scope"], "staging"
++            ),
++            0,
++        )
++        self.assertEqual(
++            self.state_count(
++                schema, fixture["fixture_scope"], "replay"
++            ),
++            0,
++        )
++        self.assertNotIn(
++            "materials.save", [name for name, _ in ports.calls]
++        )
++        self.assertNotIn(
++            "dispatch.propose", [name for name, _ in ports.calls]
++        )
++
++    def test_same_scope_race_has_one_effect_chain(self):
++        fixture = copy.deepcopy(self.fixture)
++        schema = self.schema("race")
++        self.pg.seed(self.connect, schema, fixture)
++        entered = threading.Event()
++        release = threading.Event()
++
++        class BlockingPorts(self.Ports):
++            def call(inner_self, name, request):
++                if name == "catalog.resolve":
++                    entered.set()
++                    if not release.wait(5):
++                        raise TimeoutError("test barrier")
++                return super().call(name, request)
++
++        first_ports = BlockingPorts(fixture)
++        second_ports = self.Ports(fixture)
++        first_service = self.pg.create_service(
++            self.connect, schema, first_ports
++        )
++        second_service = self.pg.create_service(
++            self.connect, schema, second_ports
++        )
++        results = []
++
++        first = threading.Thread(
++            target=lambda: results.append(
++                first_service.execute(
++                    fixture["operation"], fixture["request"]
++                )
++            )
++        )
++        second = threading.Thread(
++            target=lambda: results.append(
++                second_service.execute(
++                    fixture["operation"], fixture["request"]
++                )
++            )
++        )
++        first.start()
++        self.assertTrue(entered.wait(5))
++        second.start()
++        time.sleep(0.2)
++        self.assertTrue(second.is_alive())
++        self.assertEqual(second_ports.calls, [])
++        release.set()
++        first.join(10)
++        second.join(10)
++
++        self.assertFalse(first.is_alive())
++        self.assertFalse(second.is_alive())
++        self.assertEqual(
++            sorted(item["status"] for item in results),
++            ["OK", "REPLAY"],
++        )
++        all_calls = first_ports.calls + second_ports.calls
++        self.assertEqual(
++            sum(name == "materials.save" for name, _ in all_calls), 1
++        )
++        self.assertEqual(
++            sum(name == "dispatch.propose" for name, _ in all_calls), 1
++        )
++        self.assertEqual(
++            self.state_count(
++                schema, fixture["fixture_scope"], "replay"
++            ),
++            1,
++        )
++
++    def test_same_request_id_is_isolated_between_scopes(self):
++        first_fixture = copy.deepcopy(self.fixture)
++        second_fixture = copy.deepcopy(self.fixture)
++        second_scope = copy.deepcopy(second_fixture["fixture_scope"])
++        second_scope["lead_id"] = "lead-b"
++        second_scope["thread_id"] = "thread-b"
++        second_fixture["fixture_scope"] = second_scope
++        second_fixture["request"]["scope"] = copy.deepcopy(second_scope)
++        schema = self.schema("scopes")
++        self.pg.seed(self.connect, schema, first_fixture)
++
++        second_ports = self.Ports(second_fixture)
++        backend = self.pg.PostgresPorts(
++            self.connect, schema, second_ports
++        )
++        with backend.transaction(second_scope) as transaction:
++            transaction.put("authority", "current", {
++                "status": "ACTIVE",
++                "revision": 1,
++                "catalog_version": "v1",
++            })
++            transaction.put("catalog", "current", {
++                "version": "v1",
++                "revision": 1,
++            })
++
++        first_ports = self.Ports(first_fixture)
++        first_service = self.pg.create_service(
++            self.connect, schema, first_ports
++        )
++        second_service = self.pg.create_service(
++            self.connect, schema, second_ports
++        )
++
++        first_result = first_service.execute(
++            first_fixture["operation"], first_fixture["request"]
++        )
++        second_result = second_service.execute(
++            second_fixture["operation"], second_fixture["request"]
++        )
++
++        self.assertEqual(first_result["status"], "OK")
++        self.assertEqual(second_result["status"], "OK")
++        self.assertEqual(
++            self.state_count(
++                schema, first_fixture["fixture_scope"], "replay"
++            ),
++            1,
++        )
++        self.assertEqual(
++            self.state_count(schema, second_scope, "replay"), 1
++        )
++
++    def test_sql_constraints_reject_empty_bucket(self):
++        fixture = copy.deepcopy(self.fixture)
++        schema = self.schema("constraints")
++        self.pg.seed(self.connect, schema, fixture)
++        backend = self.pg.PostgresPorts(
++            self.connect, schema, self.Ports(fixture)
++        )
++
++        with self.assertRaises(Exception):
++            with backend.transaction(
++                fixture["fixture_scope"]
++            ) as transaction:
++                transaction.put("", "bad", {"value": True})
++
++        self.assertEqual(
++            self.state_count(
++                schema, fixture["fixture_scope"], "replay"
++            ),
++            0,
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/first_materials_runtime/test_api.py b/tests/first_materials_runtime/test_api.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb982e2a687df62a768d53c516174b89eafa175e
+--- /dev/null
++++ b/tests/first_materials_runtime/test_api.py
+@@ -0,0 +1,1349 @@
++"""Проверки входных данных и прав доступа B8-04."""
++
++import unittest
++from typing import Any
++from types import SimpleNamespace
++
++from first_materials_runtime.api import create_service
++
++
++class MaterialsServiceTests(unittest.TestCase):
++    def setUp(self):
++        # Перед каждым тестом создаётся новый корректный запрос.
++        self.request = {
++            "scope": {
++                "client_id": "client-a",
++                "campaign_id": "00000000-0000-0000-0000-000000000001",
++                "lead_id": "lead-a",
++                "mailbox_ref": "mailbox-a",
++                "thread_id": "thread-a",
++            },
++            "request_id": "request-a",
++            "event_id": "event-a",
++            "catalog_version": "v1",
++            "kind": "PRODUCT_INFO",
++        }
++
++    def service(self, *, authenticated=True,
++                capabilities=None, client_id="client-a"):
++        # Это тестовый источник доверенных сведений о пользователе.
++        if capabilities is None:
++            capabilities = ["materials.prepare"]
++
++        ports = SimpleNamespace(auth={
++            "authenticated": authenticated,
++            "capabilities": capabilities,
++            "client_id": client_id,
++        })
++        return create_service(ports)
++
++    def assert_invalid(self, operation, request):
++        result = create_service(None).execute(operation, request)
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "INVALID_REQUEST"},
++        })
++
++    def test_unknown_operation(self):
++        self.assert_invalid("unknown", self.request)
++
++    def test_request_must_be_dictionary(self):
++        self.assert_invalid("prepare", None)
++
++    def test_missing_field(self):
++        del self.request["event_id"]
++        self.assert_invalid("prepare", self.request)
++
++    def test_extra_field_before_authentication(self):
++        # Отсутствие ports не мешает отклонить неверный запрос.
++        self.request["trusted"] = True
++        self.assert_invalid("prepare", self.request)
++
++    def test_unauthenticated(self):
++        result = self.service(authenticated=False).execute(
++            "prepare", self.request
++        )
++        self.assertEqual(result, {
++            "status": "UNAUTHENTICATED",
++            "data": {},
++        })
++
++    def test_missing_capability(self):
++        result = self.service(capabilities=[]).execute(
++            "prepare", self.request
++        )
++        self.assertEqual(result, {
++            "status": "UNAUTHORIZED",
++            "data": {},
++        })
++
++    def test_foreign_client(self):
++        result = self.service(client_id="client-b").execute(
++            "prepare", self.request
++        )
++        self.assertEqual(result, {
++            "status": "UNAUTHORIZED",
++            "data": {},
++        })
++
++    def test_missing_transaction(self):
++        # Авторизация есть, интерфейс хранилища отсутствует.
++        result = self.service().execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "DEPENDENCY_UNAVAILABLE",
++            "data": {},
++        })
++
++    def test_missing_call_port_precedes_terminal_state(self):
++        state = {
++            "authority": {
++                "current": {"status": "STOPPED", "revision": 2},
++            },
++            "catalog": {
++                "current": {"version": "v1", "revision": 1},
++            },
++        }
++        service = self.service()
++        service.ports.transaction = lambda scope: RestoringTransaction(
++            state
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "DEPENDENCY_UNAVAILABLE",
++            "data": {},
++        })
++
++    def test_missing_state(self):
++        from contextlib import nullcontext
++        from unittest.mock import Mock
++
++        service = self.service()
++        tx = Mock()
++
++        # Проверяем отсутствие каждого обязательного состояния.
++        for missing in ("authority", "catalog"):
++            with self.subTest(missing=missing):
++                states: dict[str, Any] = {
++                    "authority": {"status": "ACTIVE", "revision": 1},
++                    "catalog": {"version": "v1", "revision": 1},
++                }
++                states[missing] = None
++                tx.get.side_effect = lambda bucket, key: states[bucket]
++                service.ports.transaction = Mock(
++                    return_value=nullcontext(tx)
++                )
++
++                result = service.execute("prepare", self.request)
++
++                self.assertEqual(result, {
++                    "status": "DEPENDENCY_UNAVAILABLE",
++                    "data": {},
++                })
++
++    def test_invalid_state_revision_rejected(self):
++        from contextlib import nullcontext
++        from unittest.mock import Mock
++
++        for bad_revision in (True, -1, "1"):
++            with self.subTest(revision=bad_revision):
++                service = self.service()
++                tx = Mock()
++                states = {
++                    "authority": {
++                        "status": "ACTIVE",
++                        "revision": bad_revision,
++                    },
++                    "catalog": {"version": "v1", "revision": 1},
++                }
++                tx.get.side_effect = lambda bucket, key: states[bucket]
++                service.ports.transaction = Mock(
++                    return_value=nullcontext(tx)
++                )
++                service.ports.call = Mock()
++
++                result = service.execute("prepare", self.request)
++
++                self.assertEqual(result, {
++                    "status": "INVALID",
++                    "data": {"code": "INVALID_STATE"},
++                })
++                service.ports.call.assert_not_called()
++
++    def test_terminal_states_block_without_effects(self):
++        from contextlib import nullcontext
++        from unittest.mock import Mock
++
++        for status in ("STOPPED", "HUMAN"):
++            with self.subTest(status=status):
++                service = self.service()
++                tx = Mock()
++
++                states = {
++                    "authority": {"status": status, "revision": 1},
++                    "catalog": {"version": "v1", "revision": 1},
++                }
++                tx.get.side_effect = lambda bucket, key: states[bucket]
++
++                service.ports.transaction = Mock(
++                    return_value=nullcontext(tx)
++                )
++                service.ports.call = Mock()
++
++                result = service.execute("prepare", self.request)
++
++                self.assertEqual(result, {
++                    "status": "BLOCKED",
++                    "data": {},
++                })
++
++                # Запрещены записи и вызовы подготовки материалов.
++                tx.put.assert_not_called()
++                tx.remove.assert_not_called()
++                service.ports.call.assert_not_called()
++
++                # В хранилище передан исходный scope.
++                service.ports.transaction.assert_called_once_with(
++                    self.request["scope"]
++                )
++    def catalog_service(self):
++        """Создаём сервис с активным состоянием и тестовыми портами."""
++        from contextlib import nullcontext
++        from unittest.mock import Mock
++
++        service = self.service()
++        tx = Mock()
++        states = {
++            "authority": {"status": "ACTIVE", "revision": 1},
++            "catalog": {"version": "v1", "revision": 1},
++        }
++        tx.get.side_effect = lambda bucket, key: states.get(bucket)
++        service.ports.transaction = Mock(
++            return_value=nullcontext(tx)
++        )
++        service.ports.call = Mock()
++        return service, tx
++
++    def test_catalog_dependency_unavailable(self):
++        service, tx = self.catalog_service()
++
++        # Имитируем сигнал отсутствующей зависимости из стенда.
++        class MissingDependency(RuntimeError):
++            pass
++
++        service.ports.call.side_effect = MissingDependency(
++            "catalog.resolve"
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "DEPENDENCY_UNAVAILABLE",
++            "data": {},
++        })
++        tx.put.assert_not_called()
++
++    def test_unapproved_catalog_blocked(self):
++        service, tx = self.catalog_service()
++        service.ports.call.return_value = {
++            "version": "v1",
++            "bundle_ref": "bundle-a",
++            "approved": False,
++        }
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "BLOCKED",
++            "data": {},
++        })
++        service.ports.call.assert_called_once_with(
++            "catalog.resolve",
++            {
++                "scope": self.request["scope"],
++                "version": "v1",
++            },
++        )
++        tx.put.assert_not_called()
++
++    def test_catalog_version_mismatch(self):
++        service, tx = self.catalog_service()
++        service.ports.call.return_value = {
++            "version": "v2",
++            "bundle_ref": "bundle-a",
++            "approved": True,
++        }
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "CATALOG_VERSION_MISMATCH"},
++        })
++        tx.put.assert_not_called()
++
++    def test_invalid_catalog_response(self):
++        responses = [
++            None,
++            {},
++            {"version": "v1", "bundle_ref": "bundle-a", "approved": 1},
++            {"version": "v1", "bundle_ref": "", "approved": True},
++            {
++                "version": "v1",
++                "bundle_ref": "bundle-a",
++                "approved": True,
++                "extra": True,
++            },
++        ]
++
++        for response in responses:
++            with self.subTest(response=response):
++                service, tx = self.catalog_service()
++                service.ports.call.return_value = response
++
++                result = service.execute("prepare", self.request)
++
++                self.assertEqual(result, {
++                    "status": "INVALID",
++                    "data": {"code": "INVALID_CATALOG_RESPONSE"},
++                })
++                tx.put.assert_not_called()
++
++    def event_service(self, event):
++        """Каталог корректен; вторым вызовом возвращаем событие."""
++        service, tx = self.catalog_service()
++        service.ports.call.side_effect = [
++            {
++                "version": "v1",
++                "bundle_ref": "bundle-a",
++                "approved": True,
++            },
++            event,
++        ]
++        return service, tx
++
++    def test_invalid_event_response(self):
++        service, tx = self.event_service(None)
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "INVALID_EVENT_RESPONSE"},
++        })
++        tx.put.assert_not_called()
++
++    def test_event_identity_mismatch(self):
++        service, tx = self.event_service({
++            "event_id": "foreign-event",
++            "kind": "HUMAN_QUESTION",
++            "coverage_complete": True,
++        })
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "EVENT_ID_MISMATCH"},
++        })
++        tx.put.assert_not_called()
++
++    def test_event_scope_mismatch(self):
++        foreign_scope = dict(self.request["scope"])
++        foreign_scope["client_id"] = "client-b"
++
++        service, tx = self.event_service({
++            "event_id": "event-a",
++            "scope": foreign_scope,
++            "kind": "HUMAN_QUESTION",
++            "coverage_complete": True,
++        })
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "SCOPE_MISMATCH"},
++        })
++        tx.put.assert_not_called()
++
++    def test_unsuitable_events_blocked_without_materials(self):
++        for kind, coverage in (
++            ("HUMAN_QUESTION", False),
++            ("INTEREST", True),
++            ("HUMAN_OBJECTION", True),
++        ):
++            with self.subTest(kind=kind, coverage=coverage):
++                service, tx = self.event_service({
++                    "event_id": "event-a",
++                    "kind": kind,
++                    "coverage_complete": coverage,
++                })
++
++                result = service.execute("prepare", self.request)
++
++                self.assertEqual(result, {
++                    "status": "BLOCKED",
++                    "data": {},
++                })
++                tx.put.assert_not_called()
++
++                # Были только чтения каталога и события.
++                # Подготовка, сохранение и постановка в очередь не вызывались.
++                self.assertEqual(
++                    [
++                        item.args[0]
++                        for item in service.ports.call.call_args_list
++                    ],
++                    ["catalog.resolve", "d1.event"],
++                )
++                service.ports.call.assert_called_with(
++                    "d1.event",
++                    {
++                        "scope": self.request["scope"],
++                        "event_id": "event-a",
++                    },
++                )
++    def test_invalid_material_response_rejected(self):
++        event = {
++            "event_id": "event-a",
++            "kind": "HUMAN_QUESTION",
++            "coverage_complete": True,
++            "approved_fact_ids": ["fact-a"],
++        }
++
++        cases = [
++            (None, "INVALID_MATERIAL_DESCRIPTOR"),
++            ({}, "INVALID_MATERIAL_DESCRIPTOR"),
++            (
++                {
++                    "material_ref": "material-a",
++                    "sha256": "wrong",
++                    "approved_fact_ids": ["fact-a"],
++                },
++                "INVALID_HASH",
++            ),
++        ]
++
++        for material, expected_code in cases:
++            with self.subTest(material=material):
++                service, tx = self.event_service(event)
++
++                # Ответы зависимостей идут в порядке вызова:
++                # каталог → событие → подготовленный материал.
++                service.ports.call.side_effect = [
++                    {
++                        "version": "v1",
++                        "bundle_ref": "bundle-a",
++                        "approved": True,
++                    },
++                    event,
++                    material,
++                ]
++
++                actual = service.execute(
++                    "prepare", self.request
++                )
++
++                self.assertEqual(
++                    actual,
++                    {
++                        "status": "INVALID",
++                        "data": {"code": expected_code},
++                    },
++                )
++                tx.put.assert_not_called()
++                tx.remove.assert_not_called()
++                self.assertEqual(
++                    service.ports.call.call_count, 3
++                )
++
++    def test_material_with_foreign_facts_rejected(self):
++        event = {
++            "event_id": "event-a",
++            "kind": "HUMAN_QUESTION",
++            "coverage_complete": True,
++            "approved_fact_ids": ["fact-a"],
++        }
++
++        service, tx = self.event_service(event)
++        service.ports.call.side_effect = [
++            {
++                "version": "v1",
++                "bundle_ref": "bundle-a",
++                "approved": True,
++            },
++            event,
++            {
++                "material_ref": "material-a",
++                "sha256": "a" * 64,
++                "approved_fact_ids": ["foreign-fact"],
++            },
++        ]
++
++        actual = service.execute("prepare", self.request)
++
++        self.assertEqual(
++            actual,
++            {
++                "status": "INVALID",
++                "data": {"code": "FACT_SCOPE_MISMATCH"},
++            },
++        )
++
++        # Чужие факты не должны попасть в хранилище.
++        tx.put.assert_not_called()
++        tx.remove.assert_not_called()
++        self.assertEqual(service.ports.call.call_count, 3)
++
++    def materialization_service(self, outcome, mutate=None):
++        """Порт материализации пишет staging в откатываемое состояние."""
++        import copy
++
++        state = {
++            "authority": {
++                "current": {"status": "ACTIVE", "revision": 1},
++            },
++            "catalog": {
++                "current": {"version": "v1", "revision": 1},
++            },
++        }
++        before = copy.deepcopy(state)
++        event = {
++            "event_id": "event-a",
++            "kind": "HUMAN_QUESTION",
++            "coverage_complete": True,
++            "approved_fact_ids": ["fact-a"],
++        }
++        calls = []
++        transactions = []
++
++        def transaction(scope):
++            tx = RestoringTransaction(state)
++            transactions.append(tx)
++            return tx
++
++        def call(name, payload):
++            calls.append((name, copy.deepcopy(payload)))
++            if name == "catalog.resolve":
++                return {
++                    "version": "v1",
++                    "bundle_ref": "bundle-a",
++                    "approved": True,
++                }
++            if name == "d1.event":
++                return event
++            if name == "f129.materialize":
++                transactions[-1].put(
++                    "staging", "draft", {"partial": True}
++                )
++                if mutate is not None:
++                    mutate(transactions[-1])
++                if isinstance(outcome, BaseException):
++                    raise outcome
++                return outcome
++            if name == "materials.save":
++                return {"material_ref": outcome["material_ref"]}
++            if name == "dispatch.propose":
++                return {
++                    "action_id": self.request["request_id"],
++                    "state": "PREPARED",
++                }
++            raise AssertionError(name)
++
++        service = self.service()
++        service.ports.transaction = transaction
++        service.ports.call = call
++        return service, state, before, calls, transactions
++
++    def test_source_domain_error_becomes_invalid_and_rolls_back(self):
++        import sys
++        from pathlib import Path
++
++        source = Path(__file__).resolve().parents[2] / "reference_source"
++        sys.path.insert(0, str(source))
++        try:
++            from sales_template_materialization import (
++                TemplateMaterializationError,
++            )
++        finally:
++            sys.path.remove(str(source))
++
++        service, state, before, calls, transactions = (
++            self.materialization_service(
++                TemplateMaterializationError("UNAPPROVED_FACT")
++            )
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "UNAPPROVED_FACT"},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++        self.assertEqual(
++            [name for name, _ in calls],
++            ["catalog.resolve", "d1.event", "f129.materialize"],
++        )
++        self.assertNotIn("replay", state)
++
++    def test_arbitrary_code_exception_is_not_a_domain_error(self):
++        class PretendDomainError(RuntimeError):
++            code = "UNAPPROVED_FACT"
++
++        service, state, before, calls, transactions = (
++            self.materialization_service(PretendDomainError())
++        )
++
++        with self.assertRaises(PretendDomainError):
++            service.execute("prepare", self.request)
++
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++
++    def test_transport_error_with_confirmed_rollback_is_not_retried(self):
++        service, state, before, calls, transactions = (
++            self.materialization_service(TimeoutError("materializer"))
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "DEPENDENCY_UNAVAILABLE",
++            "data": {},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++        self.assertEqual(
++            [name for name, _ in calls],
++            ["catalog.resolve", "d1.event", "f129.materialize"],
++        )
++        self.assertNotIn("replay", state)
++
++    def test_foreign_facts_after_staging_fully_roll_back(self):
++        material = {
++            "material_ref": "material-a",
++            "sha256": "a" * 64,
++            "approved_fact_ids": ["foreign-fact"],
++        }
++        service, state, before, calls, transactions = (
++            self.materialization_service(material)
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "FACT_SCOPE_MISMATCH"},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++        self.assertEqual(
++            [name for name, _ in calls],
++            ["catalog.resolve", "d1.event", "f129.materialize"],
++        )
++        self.assertNotIn("replay", state)
++
++    def test_invalid_descriptor_after_staging_fully_rolls_back(self):
++        material = {
++            "material_ref": "material-a",
++            "sha256": "wrong",
++            "approved_fact_ids": ["fact-a"],
++        }
++        service, state, before, calls, transactions = (
++            self.materialization_service(material)
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "INVALID_HASH"},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++        self.assertEqual(
++            [name for name, _ in calls],
++            ["catalog.resolve", "d1.event", "f129.materialize"],
++        )
++        self.assertNotIn("replay", state)
++
++    def test_stop_during_materialization_rolls_back_before_save(self):
++        material = {
++            "material_ref": "material-a",
++            "sha256": "a" * 64,
++            "approved_fact_ids": ["fact-a"],
++        }
++
++        def stop(tx):
++            tx.put("authority", "current", {
++                "status": "STOPPED",
++                "revision": 2,
++            })
++
++        service, state, before, calls, transactions = (
++            self.materialization_service(material, mutate=stop)
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {"status": "BLOCKED", "data": {}})
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++        self.assertEqual(
++            [name for name, _ in calls],
++            ["catalog.resolve", "d1.event", "f129.materialize"],
++        )
++
++    def test_catalog_change_during_materialization_rolls_back(self):
++        material = {
++            "material_ref": "material-a",
++            "sha256": "a" * 64,
++            "approved_fact_ids": ["fact-a"],
++        }
++
++        def change_catalog(tx):
++            tx.put("catalog", "current", {
++                "version": "v2",
++                "revision": 2,
++            })
++
++        service, state, before, calls, transactions = (
++            self.materialization_service(
++                material, mutate=change_catalog
++            )
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {"status": "STALE", "data": {}})
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0].rolled_back)
++        self.assertNotIn("materials.save", [name for name, _ in calls])
++
++    def save_service(self, on_save, material=None, on_dispatch=None):
++        """Сервис с настоящей транзакцией, которая умеет откатывать состояние."""
++        import copy
++
++        if material is None:
++            material = {
++                "material_ref": "material-a",
++                "sha256": "a" * 64,
++                "approved_fact_ids": ["fact-b", "fact-a"],
++            }
++
++        state = {
++            "authority": {
++                "current": {"status": "ACTIVE", "revision": 1},
++            },
++            "catalog": {
++                "current": {"version": "v1", "revision": 1},
++            },
++        }
++        before = copy.deepcopy(state)
++        event = {
++            "event_id": "event-a",
++            "kind": "HUMAN_QUESTION",
++            "coverage_complete": True,
++            "approved_fact_ids": list(material["approved_fact_ids"]),
++        }
++        calls = []
++        transactions = []
++
++        def transaction(scope):
++            tx = RestoringTransaction(state)
++            transactions.append((scope, tx))
++            return tx
++
++        def call(name, request):
++            calls.append((name, copy.deepcopy(request)))
++            if name == "catalog.resolve":
++                return {
++                    "version": "v1",
++                    "bundle_ref": "bundle-a",
++                    "approved": True,
++                }
++            if name == "d1.event":
++                return event
++            if name == "f129.materialize":
++                return material
++            if name == "materials.save":
++                return on_save(transactions[-1][1], request)
++            if name == "dispatch.propose":
++                if on_dispatch is None:
++                    return {
++                        "action_id": "action-a",
++                        "state": "PREPARED",
++                    }
++                return on_dispatch(transactions[-1][1], request)
++            raise AssertionError(name)
++
++        service = self.service()
++        service.ports.transaction = transaction
++        service.ports.call = call
++        return service, state, before, calls, transactions
++
++    def test_invalid_materials_save_response_rolls_back(self):
++        responses = (
++            None,
++            [],
++            {},
++            {"material_ref": "material-a", "extra": True},
++            {"material_ref": ""},
++            {"material_ref": "material-a\n"},
++        )
++
++        for response in responses:
++            with self.subTest(response=response):
++                def on_save(tx, request, response=response):
++                    # Запись должна исчезнуть, если ответ сохранения неверный.
++                    tx.put("materials", "draft", {"saved": True})
++                    return response
++
++                service, state, before, calls, transactions = (
++                    self.save_service(on_save)
++                )
++                result = service.execute("prepare", self.request)
++
++                self.assertEqual(result, {
++                    "status": "INVALID",
++                    "data": {"code": "INVALID_SAVE_RESPONSE"},
++                })
++                self.assertEqual(state, before)
++                self.assertTrue(transactions[-1][1].rolled_back)
++                self.assertEqual(
++                    [name for name, request in calls],
++                    [
++                        "catalog.resolve",
++                        "d1.event",
++                        "f129.materialize",
++                        "materials.save",
++                    ],
++                )
++
++    def test_materials_save_ref_mismatch_rolls_back(self):
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            return {"material_ref": "material-b"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save)
++        )
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "MATERIAL_REF_MISMATCH"},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[-1][1].rolled_back)
++        self.assertNotIn(
++            "dispatch.propose",
++            [name for name, request in calls],
++        )
++
++    def test_catalog_change_during_save_rolls_back_before_dispatch(self):
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            tx.put("catalog", "current", {
++                "version": "v2",
++                "revision": 2,
++            })
++            return {"material_ref": "material-a"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save)
++        )
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {"status": "STALE", "data": {}})
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[-1][1].rolled_back)
++        self.assertNotIn(
++            "dispatch.propose", [name for name, _ in calls]
++        )
++
++    def test_missing_materials_save_rolls_back(self):
++        class MissingDependency(RuntimeError):
++            pass
++
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            raise MissingDependency("materials.save")
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save)
++        )
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "DEPENDENCY_UNAVAILABLE",
++            "data": {},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[-1][1].rolled_back)
++        self.assertNotIn(
++            "dispatch.propose",
++            [name for name, request in calls],
++        )
++
++    def test_materials_save_exact_request_then_dispatch(self):
++        material = {
++            "material_ref": "material-a",
++            "sha256": "a" * 64,
++            "approved_fact_ids": ["fact-b", "fact-a"],
++        }
++
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            return {"material_ref": "material-a"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save, material)
++        )
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "OK",
++            "data": {
++                "request_id": "request-a",
++                "material_ref": "material-a",
++                "catalog_version": "v1",
++            },
++        })
++        save_call = next(
++            request for name, request in calls
++            if name == "materials.save"
++        )
++        self.assertEqual(save_call, {
++            "scope": self.request["scope"],
++            "request_id": "request-a",
++            "material": material,
++        })
++        self.assertEqual(
++            save_call["material"]["approved_fact_ids"],
++            ["fact-b", "fact-a"],
++        )
++        self.assertEqual(calls[-1], (
++            "dispatch.propose",
++            {
++                "scope": self.request["scope"],
++                "action_id": "request-a",
++                "kind": "PRODUCT_INFO",
++                "payload_ref": "material-a",
++            },
++        ))
++        self.assertIn("replay", state)
++        self.assertNotEqual(state, before)
++        self.assertFalse(transactions[-1][1].rolled_back)
++
++    def test_invalid_dispatch_response_rolls_back(self):
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            return {"material_ref": "material-a"}
++
++        def on_dispatch(tx, request):
++            return {"action_id": "action-a", "state": "SENT"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save, on_dispatch=on_dispatch)
++        )
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "INVALID_DISPATCH_RESPONSE"},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[-1][1].rolled_back)
++        self.assertNotIn("provider.send", [name for name, _ in calls])
++
++    def test_uncertain_commit_returns_unknown_without_retrying_effects(self):
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            return {"material_ref": "material-a"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save)
++        )
++
++        def transaction(scope):
++            if not transactions:
++                tx = UncertainCommitTransaction(state)
++            else:
++                tx = RestoringTransaction(state)
++            transactions.append((scope, tx))
++            return tx
++
++        service.ports.transaction = transaction
++
++        result = service.execute("prepare", self.request)
++
++        self.assertEqual(result, {
++            "status": "UNKNOWN",
++            "data": {"request_id": "request-a"},
++        })
++        self.assertEqual(
++            [name for name, _ in calls],
++            [
++                "catalog.resolve",
++                "d1.event",
++                "f129.materialize",
++                "materials.save",
++                "dispatch.propose",
++            ],
++        )
++        self.assertEqual(len(transactions), 2)
++        self.assertIn("replay", state)
++
++    def test_same_request_replays_without_new_effects(self):
++        def on_save(tx, request):
++            tx.put("materials", "draft", {"saved": True})
++            return {"material_ref": "material-a"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save)
++        )
++        import copy
++        first = service.execute("prepare", self.request)
++        committed = copy.deepcopy(state)
++        seen = len(calls)
++
++        second = service.execute("prepare", self.request)
++
++        self.assertEqual(first["status"], "OK")
++        self.assertEqual(second, {
++            "status": "REPLAY",
++            "data": first["data"],
++        })
++        self.assertEqual(state, committed)
++        self.assertEqual(calls[seen:], [])
++        self.assertFalse(transactions[-1][1].rolled_back)
++
++    def test_changed_request_conflicts_without_new_effects(self):
++        def on_save(tx, request):
++            return {"material_ref": "material-a"}
++
++        service, state, before, calls, transactions = (
++            self.save_service(on_save)
++        )
++        import copy
++        service.execute("prepare", self.request)
++        committed = copy.deepcopy(state)
++        seen = len(calls)
++        changed = dict(self.request)
++        changed["catalog_version"] = "v2"
++
++        result = service.execute("prepare", changed)
++
++        self.assertEqual(result, {
++            "status": "CONFLICT",
++            "data": {},
++        })
++        self.assertEqual(state, committed)
++        self.assertEqual(calls[seen:], [])
++
++    def test_initial_qualification_saves_and_queues(self):
++        request = {
++            "scope": {
++                "client_id": "client-a",
++                "campaign_id": "00000000-0000-0000-0000-000000000001",
++                "lead_id": "lead-a",
++                "mailbox_ref": "mailbox-a",
++                "thread_id": None,
++            },
++            "request_id": "initial-a",
++            "candidate_ref": "candidate-a",
++            "assessment_ref": "assessment-a",
++            "catalog_version": "v1",
++        }
++        material = {
++            "material_ref": "material-initial",
++            "sha256": "a" * 64,
++            "approved_fact_ids": ["fact-a"],
++        }
++        service, state, before, calls, transactions = (
++            self.initial_service(request, material, "QUALIFIED_FOR_PREPARATION")
++        )
++        result = service.execute("prepare_initial", request)
++
++        self.assertEqual(result, {
++            "status": "OK",
++            "data": {
++                "request_id": "initial-a",
++                "material_ref": "material-initial",
++                "catalog_version": "v1",
++                "verdict": "QUALIFIED_FOR_PREPARATION",
++            },
++        })
++        self.assertEqual(
++            [name for name, _ in calls],
++            [
++                "catalog.resolve",
++                "f129.qualify",
++                "f130.materialize_initial",
++                "materials.save",
++                "dispatch.propose",
++            ],
++        )
++        self.assertEqual(calls[-1][1]["kind"], "INITIAL_OUTREACH")
++        self.assertEqual(calls[-1][1]["action_id"], "initial-a")
++        self.assertIn("replay", state)
++
++    def test_initial_needs_review_does_not_save(self):
++        request = {
++            "scope": {
++                "client_id": "client-a",
++                "campaign_id": "00000000-0000-0000-0000-000000000001",
++                "lead_id": "lead-a",
++                "mailbox_ref": "mailbox-a",
++                "thread_id": None,
++            },
++            "request_id": "initial-a",
++            "candidate_ref": "candidate-a",
++            "assessment_ref": "assessment-a",
++            "catalog_version": "v1",
++        }
++        service, state, before, calls, transactions = (
++            self.initial_service(request, None, "NEEDS_REVIEW")
++        )
++        result = service.execute("prepare_initial", request)
++
++        self.assertEqual(result, {
++            "status": "BLOCKED",
++            "data": {"verdict": "NEEDS_REVIEW"},
++        })
++        self.assertEqual(
++            [name for name, _ in calls],
++            ["catalog.resolve", "f129.qualify"],
++        )
++        self.assertEqual(state, before)
++
++    def test_initial_invalid_descriptor_after_staging_rolls_back(self):
++        request = {
++            "scope": {
++                "client_id": "client-a",
++                "campaign_id": "00000000-0000-0000-0000-000000000001",
++                "lead_id": "lead-a",
++                "mailbox_ref": "mailbox-a",
++                "thread_id": None,
++            },
++            "request_id": "initial-a",
++            "candidate_ref": "candidate-a",
++            "assessment_ref": "assessment-a",
++            "catalog_version": "v1",
++        }
++        invalid_material = {
++            "material_ref": "material-initial",
++            "sha256": "wrong",
++            "approved_fact_ids": ["fact-a"],
++        }
++        service, state, before, calls, transactions = self.initial_service(
++            request,
++            invalid_material,
++            "QUALIFIED_FOR_PREPARATION",
++            stage_material=True,
++        )
++
++        result = service.execute("prepare_initial", request)
++
++        self.assertEqual(result, {
++            "status": "INVALID",
++            "data": {"code": "INVALID_HASH"},
++        })
++        self.assertEqual(state, before)
++        self.assertTrue(transactions[0][1].rolled_back)
++        self.assertEqual(
++            [name for name, _ in calls],
++            [
++                "catalog.resolve",
++                "f129.qualify",
++                "f130.materialize_initial",
++            ],
++        )
++        self.assertNotIn("replay", state)
++
++    def initial_service(
++        self, request, material, verdict, *, stage_material=False
++    ):
++        """Транзакция и ответы для первого контакта."""
++        import copy
++
++        state = {
++            "authority": {
++                "current": {"status": "ACTIVE", "revision": 1},
++            },
++            "catalog": {
++                "current": {"version": "v1", "revision": 1},
++            },
++        }
++        before = copy.deepcopy(state)
++        calls = []
++        transactions = []
++
++        def transaction(scope):
++            tx = RestoringTransaction(state)
++            transactions.append((scope, tx))
++            return tx
++
++        def call(name, payload):
++            calls.append((name, copy.deepcopy(payload)))
++            if name == "catalog.resolve":
++                return {
++                    "version": "v1",
++                    "bundle_ref": "bundle-a",
++                    "approved": True,
++                }
++            if name == "f129.qualify":
++                return {
++                    "verdict": verdict,
++                    "qualification_ref": "qualification-a",
++                    "reason_codes": ["QUALIFICATION_INPUTS_SUFFICIENT"],
++                }
++            if name == "f130.materialize_initial":
++                if stage_material:
++                    transactions[-1][1].put(
++                        "staging", "initial-draft", {"partial": True}
++                    )
++                return material
++            if name == "materials.save":
++                return {"material_ref": material["material_ref"]}
++            if name == "dispatch.propose":
++                return {"action_id": "initial-action", "state": "PREPARED"}
++            raise AssertionError(name)
++
++        service = self.service()
++        service.ports.transaction = transaction
++        service.ports.call = call
++        return service, state, before, calls, transactions
++
++
++class RestoringTransaction:
++    """Тестовая транзакция: исключение возвращает прежнее состояние."""
++
++    def __init__(self, state):
++        self.state = state
++        self.rolled_back = False
++
++    def __enter__(self):
++        import copy
++        self._before = copy.deepcopy(self.state)
++        return self
++
++    def __exit__(self, exc_type, exc, tb):
++        import copy
++        if exc_type is not None:
++            self.state.clear()
++            self.state.update(copy.deepcopy(self._before))
++            self.rolled_back = True
++        return False
++
++    def get(self, bucket, key):
++        import copy
++        value = self.state.get(bucket, {}).get(key)
++        return copy.deepcopy(value)
++
++    def put(self, bucket, key, value):
++        import copy
++        self.state.setdefault(bucket, {})[key] = copy.deepcopy(value)
++
++    def remove(self, bucket, key):
++        self.state.setdefault(bucket, {}).pop(key, None)
++
++
++class UncertainCommitTransaction(RestoringTransaction):
++    """Имитирует timeout после тела, когда результат commit неизвестен."""
++
++    def __exit__(self, exc_type, exc, tb):
++        if exc_type is not None:
++            return super().__exit__(exc_type, exc, tb)
++        raise TimeoutError("commit outcome is unknown")
++
++
++class MaterialDescriptorTests(unittest.TestCase):
++    """Проверяем описание материала отдельно от хранилища."""
++
++    def setUp(self):
++        self.material = {
++            "material_ref": "material-a",
++            "sha256": "a" * 64,
++            "approved_fact_ids": ["fact-a", "fact-b"],
++        }
++
++    def test_valid_material_descriptor(self):
++        from first_materials_runtime.api import material_error
++
++        self.assertIsNone(material_error(self.material))
++
++        # Пустой список фактов также допустим по формату.
++        self.material["approved_fact_ids"] = []
++        self.assertIsNone(material_error(self.material))
++
++    def test_invalid_material_descriptor(self):
++        from first_materials_runtime.api import material_error
++
++        invalid_materials = [
++            None,
++            {},
++            {**self.material, "extra": True},
++            {**self.material, "material_ref": ""},
++            {**self.material, "material_ref": " material-a"},
++            {**self.material, "material_ref": "material\n"},
++        ]
++
++        for material in invalid_materials:
++            with self.subTest(material=material):
++                self.assertEqual(
++                    material_error(material),
++                    "INVALID_MATERIAL_DESCRIPTOR",
++                )
++
++    def test_invalid_material_hash(self):
++        from first_materials_runtime.api import material_error
++
++        # SHA-256: ровно 64 символа из 0–9 и a–f.
++        for digest in (None, "", "a" * 63, "a" * 65,
++                       "A" * 64, "g" * 64):
++            with self.subTest(digest=digest):
++                material = {
++                    **self.material,
++                    "sha256": digest,
++                }
++
++                self.assertEqual(
++                    material_error(material),
++                    "INVALID_HASH",
++                )
++
++    def test_invalid_material_fact_ids(self):
++        from first_materials_runtime.api import material_error
++
++        invalid_facts = [
++            None,
++            "fact-a",
++            ["fact-a", "fact-a"],
++            [""],
++            [" fact-a"],
++            ["fact\n"],
++            [42],
++        ]
++
++        for facts in invalid_facts:
++            with self.subTest(facts=facts):
++                material = {
++                    **self.material,
++                    "approved_fact_ids": facts,
++                }
++
++                self.assertEqual(
++                    material_error(material),
++                    "INVALID_MATERIAL_DESCRIPTOR",
++                )
++
++if __name__ == "__main__":
++    unittest.main()

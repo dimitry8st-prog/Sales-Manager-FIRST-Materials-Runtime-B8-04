@@ -1,0 +1,10 @@
+﻿git apply --check exit=0
+git apply exit=0
+MATCH solution\first_materials_runtime\__init__.py E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855
+MATCH solution\first_materials_runtime\api.py 3B722E8740BFC14A73A3FA01C86985B73F6EDC17CA6E0EABCCF691B62D524758
+MATCH solution\first_materials_runtime\acceptance_pg.py A050BFDAD4D0FD41F6541738188DB2CBD31EC4801D8CC11558B5B4569948E464
+MATCH solution\first_materials_runtime\migrations\0001.sql E838A2B6B9F5327D35232935BE4321AC131CAC3D45E4B2277DDC61721DF3C294
+MATCH tests\first_materials_runtime\test_api.py FE1F2004B54432A66AD468205A813BA7D3867E3F6DA63F1D0CE30119336307A1
+MATCH tests\first_materials_runtime\test_acceptance_pg.py 93E05C2A2FD09DFCF258AE0F909686962345600322D49E0EA0D2077A029B4814
+PASS patch applies to protected issued base and restores all returned code/test files
+PASS patch contains no .vscode/settings.json

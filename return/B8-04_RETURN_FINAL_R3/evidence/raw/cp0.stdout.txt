@@ -1,0 +1,27 @@
+......................................................................................
+----------------------------------------------------------------------
+Ran 86 tests in 0.082s
+
+OK
+
+................................
+----------------------------------------------------------------------
+Ran 32 tests in 0.023s
+
+OK
+
+............................................
+----------------------------------------------------------------------
+Ran 44 tests in 0.022s
+
+OK
+
+FROZEN F114 INITIAL SEND / REPLY / FOLLOWUP THREAD RULES PASS
+
+PASS exact F130 staging+archive verification+F114 SEND and hash/scope/pins/facts negatives
+PASS exact F130 staging+archive verification+F114 REPLY and hash/scope/pins/facts negatives
+PASS exact F129 qualification/source scope/stale; F130 consumer rejection zero callback
+SOURCE/OWNER CODEC FEASIBILITY ONLY; candidate/PG/installation/presentation transport NOT_RUN
+PASS descriptor fact IDs reject whitespace/control/DEL/overlength/empty/bool; 128-char boundary accepted
+
+CP0 PACKAGE/CONTRACT/FIXTURES + FROZEN SOURCE BASELINES OK; candidate implementation NOT_RUN

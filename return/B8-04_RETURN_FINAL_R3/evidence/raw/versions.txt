@@ -1,0 +1,5 @@
+﻿Python 3.12.13
+psycopg 3.3.6
+Docker client 29.6.1; server 29.6.1
+postgres (PostgreSQL) 16.15 (Debian 16.15-1.pgdg13+2)
+OS: Windows; shell: Windows PowerShell

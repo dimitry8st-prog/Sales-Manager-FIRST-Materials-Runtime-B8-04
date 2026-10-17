@@ -1,0 +1,3 @@
+PASS PG persistent replay approved_presentation
+PASS PG persistent replay initial_qualification_materials_auto_queue
+PG TRANSPORT/SCOPED COMPONENT PHASE PASS after_restart ; installed dependencies/native gate NOT_RUN

@@ -95,6 +95,27 @@ class MaterialsServiceTests(unittest.TestCase):
             "data": {},
         })
 
+    def test_missing_call_port_precedes_terminal_state(self):
+        state = {
+            "authority": {
+                "current": {"status": "STOPPED", "revision": 2},
+            },
+            "catalog": {
+                "current": {"version": "v1", "revision": 1},
+            },
+        }
+        service = self.service()
+        service.ports.transaction = lambda scope: RestoringTransaction(
+            state
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {
+            "status": "DEPENDENCY_UNAVAILABLE",
+            "data": {},
+        })
+
     def test_missing_state(self):
         from contextlib import nullcontext
         from unittest.mock import Mock
@@ -121,6 +142,35 @@ class MaterialsServiceTests(unittest.TestCase):
                     "status": "DEPENDENCY_UNAVAILABLE",
                     "data": {},
                 })
+
+    def test_invalid_state_revision_rejected(self):
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+
+        for bad_revision in (True, -1, "1"):
+            with self.subTest(revision=bad_revision):
+                service = self.service()
+                tx = Mock()
+                states = {
+                    "authority": {
+                        "status": "ACTIVE",
+                        "revision": bad_revision,
+                    },
+                    "catalog": {"version": "v1", "revision": 1},
+                }
+                tx.get.side_effect = lambda bucket, key: states[bucket]
+                service.ports.transaction = Mock(
+                    return_value=nullcontext(tx)
+                )
+                service.ports.call = Mock()
+
+                result = service.execute("prepare", self.request)
+
+                self.assertEqual(result, {
+                    "status": "INVALID",
+                    "data": {"code": "INVALID_STATE"},
+                })
+                service.ports.call.assert_not_called()
 
     def test_terminal_states_block_without_effects(self):
         from contextlib import nullcontext
@@ -448,7 +498,7 @@ class MaterialsServiceTests(unittest.TestCase):
         tx.remove.assert_not_called()
         self.assertEqual(service.ports.call.call_count, 3)
 
-    def materialization_service(self, outcome):
+    def materialization_service(self, outcome, mutate=None):
         """Порт материализации пишет staging в откатываемое состояние."""
         import copy
 
@@ -489,6 +539,8 @@ class MaterialsServiceTests(unittest.TestCase):
                 transactions[-1].put(
                     "staging", "draft", {"partial": True}
                 )
+                if mutate is not None:
+                    mutate(transactions[-1])
                 if isinstance(outcome, BaseException):
                     raise outcome
                 return outcome
@@ -620,6 +672,59 @@ class MaterialsServiceTests(unittest.TestCase):
         )
         self.assertNotIn("replay", state)
 
+    def test_stop_during_materialization_rolls_back_before_save(self):
+        material = {
+            "material_ref": "material-a",
+            "sha256": "a" * 64,
+            "approved_fact_ids": ["fact-a"],
+        }
+
+        def stop(tx):
+            tx.put("authority", "current", {
+                "status": "STOPPED",
+                "revision": 2,
+            })
+
+        service, state, before, calls, transactions = (
+            self.materialization_service(material, mutate=stop)
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {"status": "BLOCKED", "data": {}})
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+        self.assertEqual(
+            [name for name, _ in calls],
+            ["catalog.resolve", "d1.event", "f129.materialize"],
+        )
+
+    def test_catalog_change_during_materialization_rolls_back(self):
+        material = {
+            "material_ref": "material-a",
+            "sha256": "a" * 64,
+            "approved_fact_ids": ["fact-a"],
+        }
+
+        def change_catalog(tx):
+            tx.put("catalog", "current", {
+                "version": "v2",
+                "revision": 2,
+            })
+
+        service, state, before, calls, transactions = (
+            self.materialization_service(
+                material, mutate=change_catalog
+            )
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {"status": "STALE", "data": {}})
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+        self.assertNotIn("materials.save", [name for name, _ in calls])
+
     def save_service(self, on_save, material=None, on_dispatch=None):
         """Сервис с настоящей транзакцией, которая умеет откатывать состояние."""
         import copy
@@ -739,6 +844,28 @@ class MaterialsServiceTests(unittest.TestCase):
         self.assertNotIn(
             "dispatch.propose",
             [name for name, request in calls],
+        )
+
+    def test_catalog_change_during_save_rolls_back_before_dispatch(self):
+        def on_save(tx, request):
+            tx.put("materials", "draft", {"saved": True})
+            tx.put("catalog", "current", {
+                "version": "v2",
+                "revision": 2,
+            })
+            return {"material_ref": "material-a"}
+
+        service, state, before, calls, transactions = (
+            self.save_service(on_save)
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {"status": "STALE", "data": {}})
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[-1][1].rolled_back)
+        self.assertNotIn(
+            "dispatch.propose", [name for name, _ in calls]
         )
 
     def test_missing_materials_save_rolls_back(self):

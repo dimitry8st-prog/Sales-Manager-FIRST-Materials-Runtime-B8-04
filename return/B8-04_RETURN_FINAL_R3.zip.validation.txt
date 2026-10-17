@@ -1,0 +1,6 @@
+PASS: exactly one root folder B8-04_RETURN_FINAL_R3
+PASS: all SHA256SUMS entries match extracted bytes
+PASS: no cache, virtual environment, .vscode, DSN or credential-like value in ZIP
+PASS: integration patch excludes local VS Code settings
+ZIP_SHA256=2907153220008555a9db22ee5f8497f36cd622d6fddd4bea49c92a81e2711b12
+ZIP_BYTES=57299

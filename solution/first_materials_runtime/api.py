@@ -56,6 +56,11 @@ def valid_id(value):
     )
 
 
+def valid_revision(value):
+    """Ревизия — неотрицательное целое число, но не bool."""
+    return type(value) is int and value >= 0
+
+
 def valid_request(operation, request):
     """Проверяем операцию, поля запроса и значения scope."""
     if type(operation) is not str:
@@ -252,6 +257,15 @@ class InvalidPortResponse(Exception):
         self.code = code
 
 
+class TransactionResponse(Exception):
+    """Публичный отказ, который сначала должен откатить транзакцию."""
+
+    def __init__(self, status: str, data: dict[str, Any]):
+        super().__init__(status)
+        self.status = status
+        self.data = data
+
+
 def trusted_domain_code(error):
     """Возвращаем код только для известного класса исходного компонента."""
     identity = (
@@ -319,7 +333,8 @@ class MaterialsService:
 
         # 5. Проверяем наличие интерфейса транзакций.
         transaction = getattr(self.ports, "transaction", None)
-        if not callable(transaction):
+        call = getattr(self.ports, "call", None)
+        if not callable(transaction) or not callable(call):
             return {
                 "status": "DEPENDENCY_UNAVAILABLE",
                 "data": {},
@@ -360,6 +375,11 @@ class MaterialsService:
             return {
                 "status": "INVALID",
                 "data": {"code": error.code},
+            }
+        except TransactionResponse as response:
+            return {
+                "status": response.status,
+                "data": dict(response.data),
             }
         except TRANSPORT_ERRORS as error:
             if error is body_error:
@@ -437,6 +457,9 @@ class MaterialsService:
         if (
             type(authority) is not dict
             or type(catalog) is not dict
+            or not valid_revision(authority.get("revision"))
+            or not valid_revision(catalog.get("revision"))
+            or not valid_id(catalog.get("version"))
         ):
             return {
                 "status": "INVALID",
@@ -462,6 +485,22 @@ class MaterialsService:
         stored = stored_result(tx, request)
         if stored is not None:
             return stored
+
+        if catalog["version"] != request["catalog_version"]:
+            return {
+                "status": "STALE",
+                "data": {},
+            }
+
+        authority_version = authority.get("catalog_version")
+        if (
+            authority_version is not None
+            and authority_version != request["catalog_version"]
+        ):
+            return {
+                "status": "STALE",
+                "data": {},
+            }
 
         # Запрашиваем именно нужную версию каталога.
         resolved = self._call("catalog.resolve", {
@@ -579,6 +618,8 @@ class MaterialsService:
                     "material_ref": material["material_ref"],
                     "catalog_version": request["catalog_version"],
                 },
+                authority,
+                catalog,
             )
 
         qualification = self._call("f129.qualify", {
@@ -620,11 +661,39 @@ class MaterialsService:
                 "catalog_version": request["catalog_version"],
                 "verdict": "QUALIFIED_FOR_PREPARATION",
             },
+            authority,
+            catalog,
         )
 
-    def _save_and_propose(self, tx, request, material, kind, data):
+    def _ensure_state_unchanged(
+        self, tx, authority, catalog, request
+    ):
+        """Повторно проверяем STOP и версию перед необратимым этапом."""
+        current_authority = tx.get("authority", "current")
+        current_catalog = tx.get("catalog", "current")
+
+        if type(current_authority) is dict and current_authority.get(
+            "status"
+        ) in ("STOPPED", "HUMAN", "HANDED_OFF"):
+            raise TransactionResponse("BLOCKED", {})
+
+        if (
+            current_authority != authority
+            or current_catalog != catalog
+            or type(current_catalog) is not dict
+            or current_catalog.get("version")
+            != request["catalog_version"]
+        ):
+            raise TransactionResponse("STALE", {})
+
+    def _save_and_propose(
+        self, tx, request, material, kind, data, authority, catalog
+    ):
         """Сохраняем исходный descriptor и ставим действие в очередь."""
         material_ref = material["material_ref"]
+        self._ensure_state_unchanged(
+            tx, authority, catalog, request
+        )
         saved = self._call("materials.save", {
             "scope": request["scope"],
             "request_id": request["request_id"],
@@ -634,6 +703,10 @@ class MaterialsService:
         if code is not None:
             # Выход исключением откатывает транзакцию.
             raise InvalidPortResponse(code)
+
+        self._ensure_state_unchanged(
+            tx, authority, catalog, request
+        )
 
         proposed = self._call("dispatch.propose", {
             "scope": request["scope"],

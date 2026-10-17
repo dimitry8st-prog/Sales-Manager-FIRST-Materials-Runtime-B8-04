@@ -1,0 +1,9 @@
+﻿same_container_id=true
+container_id=351b35fa77e9c45e50a6cf11597d48716ad1433ba9d417138cb09b9079cccbfa
+before_pg_postmaster_start_time=2026-10-17 16:32:13.455684+00
+after_pg_postmaster_start_time=2026-10-17 16:34:23.312333+00
+after_docker_started_at=2026-10-17T16:34:22.477695884Z
+postmaster_start_increased=true
+same_schema=b8_accept_b804r3pylance
+seed_after_restart=false
+PG_GATE_after_restart_exit=0

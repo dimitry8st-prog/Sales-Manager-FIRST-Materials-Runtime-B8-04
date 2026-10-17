@@ -1,0 +1,5 @@
+﻿PASS: reference_source/sales_template_materialization.py exists
+PASS: runtime import succeeds when reference_source is on search path
+PASS: python.analysis.extraPaths preserves ./solution and adds ./reference_source
+PASS: diagnostics remain enabled; no source component changed
+PASS: .vscode/settings.json is local-only and absent from return

@@ -1,0 +1,9 @@
+test_dependency_staging_rolls_back_with_invalid_material (tests.first_materials_runtime.test_acceptance_pg.PostgresAcceptanceTests.test_dependency_staging_rolls_back_with_invalid_material) ... ok
+test_same_request_id_is_isolated_between_scopes (tests.first_materials_runtime.test_acceptance_pg.PostgresAcceptanceTests.test_same_request_id_is_isolated_between_scopes) ... ok
+test_same_scope_race_has_one_effect_chain (tests.first_materials_runtime.test_acceptance_pg.PostgresAcceptanceTests.test_same_scope_race_has_one_effect_chain) ... ok
+test_sql_constraints_reject_empty_bucket (tests.first_materials_runtime.test_acceptance_pg.PostgresAcceptanceTests.test_sql_constraints_reject_empty_bucket) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 1.349s
+
+OK

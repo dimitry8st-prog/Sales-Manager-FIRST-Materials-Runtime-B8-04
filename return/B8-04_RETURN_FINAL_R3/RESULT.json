@@ -1,0 +1,53 @@
+{
+  "package": "B8-04",
+  "revision": "R3",
+  "return_kind": "IMPLEMENTER_FINAL_RETURN",
+  "ready_for_integrator": true,
+  "whole_system_accepted": false,
+  "checks": {
+    "unit_discovery": {
+      "status": "PASS",
+      "exit_code": 0,
+      "run": 49,
+      "passed": 45,
+      "skipped_without_dsn": 4
+    },
+    "cp0": {
+      "status": "PASS",
+      "exit_code": 0,
+      "protected_files": 140
+    },
+    "cp1": {
+      "status": "PASS",
+      "exit_code": 0,
+      "cases": 19
+    },
+    "cp2": {
+      "status": "PASS",
+      "before_restart_exit_code": 0,
+      "postgres_tests_exit_code": 0,
+      "postgres_tests": 4,
+      "restart_exit_code": 0,
+      "after_restart_exit_code": 0,
+      "reseeded_after_restart": false
+    },
+    "cp3": {
+      "status": "NOT_RUN",
+      "owner": "integrator"
+    },
+    "cp4": {
+      "status": "NOT_RUN",
+      "owner": "independent_auditor"
+    }
+  },
+  "external_dependencies": [
+    "accepted owner adapters and exact bytes for F129/F130/materials/F115",
+    "central shared-runtime integration, roles, backup/restore and rollback",
+    "independent installed-system audit"
+  ],
+  "secrets_in_return": false,
+  "local_vscode_settings_in_return": false,
+  "pylance_reference_source_path_configured_locally": true,
+  "git_push_performed": false,
+  "zip_sent": false
+}
