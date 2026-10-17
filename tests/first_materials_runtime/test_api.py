@@ -448,6 +448,178 @@ class MaterialsServiceTests(unittest.TestCase):
         tx.remove.assert_not_called()
         self.assertEqual(service.ports.call.call_count, 3)
 
+    def materialization_service(self, outcome):
+        """Порт материализации пишет staging в откатываемое состояние."""
+        import copy
+
+        state = {
+            "authority": {
+                "current": {"status": "ACTIVE", "revision": 1},
+            },
+            "catalog": {
+                "current": {"version": "v1", "revision": 1},
+            },
+        }
+        before = copy.deepcopy(state)
+        event = {
+            "event_id": "event-a",
+            "kind": "HUMAN_QUESTION",
+            "coverage_complete": True,
+            "approved_fact_ids": ["fact-a"],
+        }
+        calls = []
+        transactions = []
+
+        def transaction(scope):
+            tx = RestoringTransaction(state)
+            transactions.append(tx)
+            return tx
+
+        def call(name, payload):
+            calls.append((name, copy.deepcopy(payload)))
+            if name == "catalog.resolve":
+                return {
+                    "version": "v1",
+                    "bundle_ref": "bundle-a",
+                    "approved": True,
+                }
+            if name == "d1.event":
+                return event
+            if name == "f129.materialize":
+                transactions[-1].put(
+                    "staging", "draft", {"partial": True}
+                )
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+            if name == "materials.save":
+                return {"material_ref": outcome["material_ref"]}
+            if name == "dispatch.propose":
+                return {
+                    "action_id": self.request["request_id"],
+                    "state": "PREPARED",
+                }
+            raise AssertionError(name)
+
+        service = self.service()
+        service.ports.transaction = transaction
+        service.ports.call = call
+        return service, state, before, calls, transactions
+
+    def test_source_domain_error_becomes_invalid_and_rolls_back(self):
+        import sys
+        from pathlib import Path
+
+        source = Path(__file__).resolve().parents[2] / "reference_source"
+        sys.path.insert(0, str(source))
+        try:
+            from sales_template_materialization import (
+                TemplateMaterializationError,
+            )
+        finally:
+            sys.path.remove(str(source))
+
+        service, state, before, calls, transactions = (
+            self.materialization_service(
+                TemplateMaterializationError("UNAPPROVED_FACT")
+            )
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {
+            "status": "INVALID",
+            "data": {"code": "UNAPPROVED_FACT"},
+        })
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+        self.assertEqual(
+            [name for name, _ in calls],
+            ["catalog.resolve", "d1.event", "f129.materialize"],
+        )
+        self.assertNotIn("replay", state)
+
+    def test_arbitrary_code_exception_is_not_a_domain_error(self):
+        class PretendDomainError(RuntimeError):
+            code = "UNAPPROVED_FACT"
+
+        service, state, before, calls, transactions = (
+            self.materialization_service(PretendDomainError())
+        )
+
+        with self.assertRaises(PretendDomainError):
+            service.execute("prepare", self.request)
+
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+
+    def test_transport_error_with_confirmed_rollback_is_not_retried(self):
+        service, state, before, calls, transactions = (
+            self.materialization_service(TimeoutError("materializer"))
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {
+            "status": "DEPENDENCY_UNAVAILABLE",
+            "data": {},
+        })
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+        self.assertEqual(
+            [name for name, _ in calls],
+            ["catalog.resolve", "d1.event", "f129.materialize"],
+        )
+        self.assertNotIn("replay", state)
+
+    def test_foreign_facts_after_staging_fully_roll_back(self):
+        material = {
+            "material_ref": "material-a",
+            "sha256": "a" * 64,
+            "approved_fact_ids": ["foreign-fact"],
+        }
+        service, state, before, calls, transactions = (
+            self.materialization_service(material)
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {
+            "status": "INVALID",
+            "data": {"code": "FACT_SCOPE_MISMATCH"},
+        })
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+        self.assertEqual(
+            [name for name, _ in calls],
+            ["catalog.resolve", "d1.event", "f129.materialize"],
+        )
+        self.assertNotIn("replay", state)
+
+    def test_invalid_descriptor_after_staging_fully_rolls_back(self):
+        material = {
+            "material_ref": "material-a",
+            "sha256": "wrong",
+            "approved_fact_ids": ["fact-a"],
+        }
+        service, state, before, calls, transactions = (
+            self.materialization_service(material)
+        )
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {
+            "status": "INVALID",
+            "data": {"code": "INVALID_HASH"},
+        })
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0].rolled_back)
+        self.assertEqual(
+            [name for name, _ in calls],
+            ["catalog.resolve", "d1.event", "f129.materialize"],
+        )
+        self.assertNotIn("replay", state)
+
     def save_service(self, on_save, material=None, on_dispatch=None):
         """Сервис с настоящей транзакцией, которая умеет откатывать состояние."""
         import copy
@@ -664,6 +836,44 @@ class MaterialsServiceTests(unittest.TestCase):
         self.assertTrue(transactions[-1][1].rolled_back)
         self.assertNotIn("provider.send", [name for name, _ in calls])
 
+    def test_uncertain_commit_returns_unknown_without_retrying_effects(self):
+        def on_save(tx, request):
+            tx.put("materials", "draft", {"saved": True})
+            return {"material_ref": "material-a"}
+
+        service, state, before, calls, transactions = (
+            self.save_service(on_save)
+        )
+
+        def transaction(scope):
+            if not transactions:
+                tx = UncertainCommitTransaction(state)
+            else:
+                tx = RestoringTransaction(state)
+            transactions.append((scope, tx))
+            return tx
+
+        service.ports.transaction = transaction
+
+        result = service.execute("prepare", self.request)
+
+        self.assertEqual(result, {
+            "status": "UNKNOWN",
+            "data": {"request_id": "request-a"},
+        })
+        self.assertEqual(
+            [name for name, _ in calls],
+            [
+                "catalog.resolve",
+                "d1.event",
+                "f129.materialize",
+                "materials.save",
+                "dispatch.propose",
+            ],
+        )
+        self.assertEqual(len(transactions), 2)
+        self.assertIn("replay", state)
+
     def test_same_request_replays_without_new_effects(self):
         def on_save(tx, request):
             tx.put("materials", "draft", {"saved": True})
@@ -787,7 +997,53 @@ class MaterialsServiceTests(unittest.TestCase):
         )
         self.assertEqual(state, before)
 
-    def initial_service(self, request, material, verdict):
+    def test_initial_invalid_descriptor_after_staging_rolls_back(self):
+        request = {
+            "scope": {
+                "client_id": "client-a",
+                "campaign_id": "00000000-0000-0000-0000-000000000001",
+                "lead_id": "lead-a",
+                "mailbox_ref": "mailbox-a",
+                "thread_id": None,
+            },
+            "request_id": "initial-a",
+            "candidate_ref": "candidate-a",
+            "assessment_ref": "assessment-a",
+            "catalog_version": "v1",
+        }
+        invalid_material = {
+            "material_ref": "material-initial",
+            "sha256": "wrong",
+            "approved_fact_ids": ["fact-a"],
+        }
+        service, state, before, calls, transactions = self.initial_service(
+            request,
+            invalid_material,
+            "QUALIFIED_FOR_PREPARATION",
+            stage_material=True,
+        )
+
+        result = service.execute("prepare_initial", request)
+
+        self.assertEqual(result, {
+            "status": "INVALID",
+            "data": {"code": "INVALID_HASH"},
+        })
+        self.assertEqual(state, before)
+        self.assertTrue(transactions[0][1].rolled_back)
+        self.assertEqual(
+            [name for name, _ in calls],
+            [
+                "catalog.resolve",
+                "f129.qualify",
+                "f130.materialize_initial",
+            ],
+        )
+        self.assertNotIn("replay", state)
+
+    def initial_service(
+        self, request, material, verdict, *, stage_material=False
+    ):
         """Транзакция и ответы для первого контакта."""
         import copy
 
@@ -823,6 +1079,10 @@ class MaterialsServiceTests(unittest.TestCase):
                     "reason_codes": ["QUALIFICATION_INPUTS_SUFFICIENT"],
                 }
             if name == "f130.materialize_initial":
+                if stage_material:
+                    transactions[-1][1].put(
+                        "staging", "initial-draft", {"partial": True}
+                    )
                 return material
             if name == "materials.save":
                 return {"material_ref": material["material_ref"]}
@@ -867,6 +1127,15 @@ class RestoringTransaction:
 
     def remove(self, bucket, key):
         self.state.setdefault(bucket, {}).pop(key, None)
+
+
+class UncertainCommitTransaction(RestoringTransaction):
+    """Имитирует timeout после тела, когда результат commit неизвестен."""
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            return super().__exit__(exc_type, exc, tb)
+        raise TimeoutError("commit outcome is unknown")
 
 
 class MaterialDescriptorTests(unittest.TestCase):
