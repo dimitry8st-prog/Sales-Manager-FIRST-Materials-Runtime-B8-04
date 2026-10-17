@@ -1,5 +1,7 @@
 """Подготовка утверждённых материалов: компонент B8-04."""
 
+import hashlib
+import json
 from typing import Any, ContextManager, cast
 from uuid import UUID
 
@@ -7,27 +9,18 @@ from uuid import UUID
 # Точный набор полей для каждой операции.
 REQUEST_FIELDS = {
     "prepare": {
-        "scope",
-        "request_id",
-        "event_id",
-        "catalog_version",
-        "kind",
+        "scope", "request_id", "event_id",
+        "catalog_version", "kind",
     },
     "prepare_initial": {
-        "scope",
-        "request_id",
-        "candidate_ref",
-        "assessment_ref",
-        "catalog_version",
+        "scope", "request_id", "candidate_ref",
+        "assessment_ref", "catalog_version",
     },
 }
 
 SCOPE_FIELDS = {
-    "client_id",
-    "campaign_id",
-    "lead_id",
-    "mailbox_ref",
-    "thread_id",
+    "client_id", "campaign_id", "lead_id",
+    "mailbox_ref", "thread_id",
 }
 
 
@@ -60,18 +53,14 @@ def valid_request(operation, request):
         return False
 
     scope = request["scope"]
-
-    if type(scope) is not dict:
-        return False
-
-    if set(scope) != SCOPE_FIELDS:
+    if type(scope) is not dict or set(scope) != SCOPE_FIELDS:
         return False
 
     for field in SCOPE_FIELDS:
         value = scope[field]
 
         if field == "thread_id" and operation == "prepare_initial":
-            # До первого сообщения thread ещё отсутствует.
+            # До первого сообщения provider thread отсутствует.
             if value is not None:
                 return False
         elif not valid_id(value):
@@ -94,8 +83,155 @@ def valid_request(operation, request):
 
     return True
 
+
+def material_error(material):
+    """Возвращаем код ошибки или None для корректного описания."""
+    if (
+        type(material) is not dict
+        or set(material) != {
+            "material_ref", "sha256", "approved_fact_ids"
+        }
+    ):
+        return "INVALID_MATERIAL_DESCRIPTOR"
+
+    if not valid_id(material["material_ref"]):
+        return "INVALID_MATERIAL_DESCRIPTOR"
+
+    # Проверяем формат SHA-256, а не содержимое самого материала.
+    digest = material["sha256"]
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        return "INVALID_HASH"
+
+    facts = material["approved_fact_ids"]
+    if type(facts) is not list:
+        return "INVALID_MATERIAL_DESCRIPTOR"
+
+    if not all(valid_id(fact) for fact in facts):
+        return "INVALID_MATERIAL_DESCRIPTOR"
+
+    # Повторяющиеся идентификаторы фактов запрещены.
+    if len(set(facts)) != len(facts):
+        return "INVALID_MATERIAL_DESCRIPTOR"
+
+    return None
+
+
+def save_response_error(saved, material_ref):
+    """Код ошибки ответа materials.save или None."""
+    if (
+        type(saved) is not dict
+        or set(saved) != {"material_ref"}
+        or not valid_id(saved["material_ref"])
+    ):
+        return "INVALID_SAVE_RESPONSE"
+
+    # Сохранённая ссылка должна совпасть с переданным описанием.
+    if saved["material_ref"] != material_ref:
+        return "MATERIAL_REF_MISMATCH"
+
+    return None
+
+
+def request_fingerprint(request):
+    """Одинаковый запрос всегда даёт один и тот же отпечаток."""
+    raw = json.dumps(
+        request,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def replay_key(request):
+    """Ключ повтора: scope и request_id, без текста письма."""
+    return json.dumps(
+        [request["scope"], request["request_id"]],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def stored_result(tx, request):
+    """REPLAY для того же запроса и CONFLICT, если байты изменились."""
+    stored = tx.get("replay", replay_key(request))
+    if stored is None:
+        return None
+
+    if (
+        type(stored) is dict
+        and stored.get("fingerprint") == request_fingerprint(request)
+        and type(stored.get("data")) is dict
+    ):
+        return {
+            "status": "REPLAY",
+            "data": dict(stored["data"]),
+        }
+
+    return {
+        "status": "CONFLICT",
+        "data": {},
+    }
+
+
+def qualification_error(value):
+    """Код ошибки ответа квалификации или None."""
+    verdicts = (
+        "QUALIFIED_FOR_PREPARATION",
+        "NOT_QUALIFIED",
+        "NEEDS_REVIEW",
+    )
+    if (
+        type(value) is not dict
+        or set(value) != {
+            "verdict", "qualification_ref", "reason_codes"
+        }
+        or value["verdict"] not in verdicts
+        or not valid_id(value["qualification_ref"])
+    ):
+        return "INVALID_QUALIFICATION_RESPONSE"
+
+    reasons = value["reason_codes"]
+    if (
+        type(reasons) is not list
+        or not all(type(item) is str for item in reasons)
+    ):
+        return "INVALID_QUALIFICATION_RESPONSE"
+
+    return None
+
+
+def dispatch_response_error(value):
+    """Код ошибки ответа dispatch.propose или None."""
+    if (
+        type(value) is not dict
+        or set(value) != {"action_id", "state"}
+        or not valid_id(value["action_id"])
+        or value["state"] != "PREPARED"
+    ):
+        return "INVALID_DISPATCH_RESPONSE"
+
+    return None
+
+
 class DependencyUnavailable(RuntimeError):
     """Обязательная зависимость недоступна."""
+
+
+class InvalidPortResponse(Exception):
+    """Неверный ответ зависимости. Исключение выходит из транзакции и откатывает её."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
 
 class MaterialsService:
     def __init__(self, ports: Any):
@@ -112,7 +248,6 @@ class MaterialsService:
 
         # 2. Получаем сведения о пользователе из доверенных ports.
         auth = getattr(self.ports, "auth", None)
-
         if (
             type(auth) is not dict
             or auth.get("authenticated") is not True
@@ -124,7 +259,6 @@ class MaterialsService:
 
         # 3. Проверяем разрешение на подготовку материалов.
         capabilities = auth.get("capabilities", [])
-
         if (
             type(capabilities) is not list
             or not (
@@ -146,7 +280,6 @@ class MaterialsService:
 
         # 5. Проверяем наличие интерфейса транзакций.
         transaction = getattr(self.ports, "transaction", None)
-
         if not callable(transaction):
             return {
                 "status": "DEPENDENCY_UNAVAILABLE",
@@ -173,22 +306,31 @@ class MaterialsService:
                 "status": "DEPENDENCY_UNAVAILABLE",
                 "data": {},
             }
+        except InvalidPortResponse as error:
+            # Откат уже выполнен: исключение вышло из контекста транзакции.
+            return {
+                "status": "INVALID",
+                "data": {"code": error.code},
+            }
+
     def _call(self, name, request):
         """Вызываем зависимость через доверенный интерфейс."""
         call = getattr(self.ports, "call", None)
-
         if not callable(call):
             raise DependencyUnavailable(name)
 
         try:
             return call(name, request)
         except Exception as exc:
+            # Так выданный стенд сообщает об отсутствии зависимости.
             if type(exc).__name__ == "MissingDependency":
                 raise DependencyUnavailable(name) from exc
+
+            # Остальные ошибки не маскируем.
             raise
 
     def _execute_in_transaction(self, tx, operation, request):
-        """Проверяем состояние перед подготовкой материалов."""
+        """Проверяем состояние, каталог, событие и материал."""
         authority = tx.get("authority", "current")
         catalog = tx.get("catalog", "current")
 
@@ -210,40 +352,41 @@ class MaterialsService:
 
         # Остановка и передача человеку блокируют автоматизацию.
         if authority.get("status") in (
-            "STOPPED",
-            "HUMAN",
-            "HANDED_OFF",
+            "STOPPED", "HUMAN", "HANDED_OFF"
         ):
             return {
                 "status": "BLOCKED",
                 "data": {},
             }
 
-        # Продолжение возможно только при явном ACTIVE.
         if authority.get("status") != "ACTIVE":
             return {
                 "status": "INVALID",
                 "data": {"code": "INVALID_STATE"},
             }
 
+        # Повтор узнаём до новых вызовов каталога, сохранения и очереди.
+        stored = stored_result(tx, request)
+        if stored is not None:
+            return stored
 
-        # Запрашиваем нужную версию каталога через доверенный порт.
+        # Запрашиваем именно нужную версию каталога.
         resolved = self._call("catalog.resolve", {
             "scope": request["scope"],
             "version": request["catalog_version"],
         })
 
-        # Проверяем точный состав ответа.
         if (
             type(resolved) is not dict
-            or set(resolved) != {"version", "bundle_ref", "approved"}
+            or set(resolved) != {
+                "version", "bundle_ref", "approved"
+            }
         ):
             return {
                 "status": "INVALID",
                 "data": {"code": "INVALID_CATALOG_RESPONSE"},
             }
 
-        # Проверяем типы и идентификаторы.
         if (
             not valid_id(resolved["version"])
             or not valid_id(resolved["bundle_ref"])
@@ -261,7 +404,6 @@ class MaterialsService:
                 "data": {"code": "CATALOG_VERSION_MISMATCH"},
             }
 
-        # Неутверждённые материалы использовать запрещено.
         if not resolved["approved"]:
             return {
                 "status": "BLOCKED",
@@ -269,7 +411,7 @@ class MaterialsService:
             }
 
         if operation == "prepare":
-            # Получаем событие из истории указанного диалога.
+            # Читаем событие только из указанного диалога.
             event = self._call("d1.event", {
                 "scope": request["scope"],
                 "event_id": request["event_id"],
@@ -281,14 +423,12 @@ class MaterialsService:
                     "data": {"code": "INVALID_EVENT_RESPONSE"},
                 }
 
-            # Зависимость должна вернуть именно запрошенное событие.
             if event.get("event_id") != request["event_id"]:
                 return {
                     "status": "INVALID",
                     "data": {"code": "EVENT_ID_MISMATCH"},
                 }
 
-            # Если scope присутствует в ответе, он обязан совпадать.
             if "scope" in event and event["scope"] != request["scope"]:
                 return {
                     "status": "INVALID",
@@ -302,8 +442,7 @@ class MaterialsService:
                     "data": {},
                 }
 
-            # Только информационный вопрос допускает эту ветку.
-            # INTEREST обрабатывается отдельной веткой передачи человеку.
+            # INTEREST не разрешает продолжать автоматическую продажу.
             if event.get("kind") != "HUMAN_QUESTION":
                 return {
                     "status": "BLOCKED",
@@ -318,25 +457,134 @@ class MaterialsService:
                 "kind": request["kind"],
             })
 
-            # Пока проверяем, что зависимость вернула словарь.
-            # Проверку всех полей результата добавим следующим шагом.
-            if type(material) is not dict:
+            # Проверяем точный формат описания материала.
+            code = material_error(material)
+            if code is not None:
                 return {
                     "status": "INVALID",
-                    "data": {"code": "INVALID_MATERIAL_DESCRIPTOR"},
+                    "data": {"code": code},
+                }
+            material = cast(dict[str, Any], material)
+            # Материал может использовать только разрешённые факты.
+            allowed_facts = event.get("approved_fact_ids")
+            if (
+                type(allowed_facts) is not list
+                or not all(valid_id(fact) for fact in allowed_facts)
+            ):
+                return {
+                    "status": "INVALID",
+                    "data": {"code": "FACT_SCOPE_MISMATCH"},
                 }
 
-            raise NotImplementedError(
-                "Материал получен; проверка и сохранение ещё не добавлены"
+            if not set(material["approved_fact_ids"]).issubset(
+                set(allowed_facts)
+            ):
+                return {
+                    "status": "INVALID",
+                    "data": {"code": "FACT_SCOPE_MISMATCH"},
+                }
+
+            # Списки фактов сохраняют исходный порядок.
+            return self._save_and_propose(
+                tx,
+                request,
+                material,
+                request["kind"],
+                {
+                    "request_id": request["request_id"],
+                    "material_ref": material["material_ref"],
+                    "catalog_version": request["catalog_version"],
+                },
             )
 
-        # Первый контакт требует отдельной квалификации кандидата.
-        raise NotImplementedError(
-            "Ветка prepare_initial ещё не добавлена"
+        qualification = self._call("f129.qualify", {
+            "scope": request["scope"],
+            "candidate_ref": request["candidate_ref"],
+            "assessment_ref": request["assessment_ref"],
+            "catalog_version": request["catalog_version"],
+        })
+        code = qualification_error(qualification)
+        if code is not None:
+            raise InvalidPortResponse(code)
+        qualification = cast(dict[str, Any], qualification)
+
+        # Без допуска к подготовке материал не сохраняем и не ставим в очередь.
+        if qualification["verdict"] != "QUALIFIED_FOR_PREPARATION":
+            return {
+                "status": "BLOCKED",
+                "data": {"verdict": qualification["verdict"]},
+            }
+
+        material = self._call("f130.materialize_initial", {
+            "scope": request["scope"],
+            "qualification_ref": qualification["qualification_ref"],
+            "catalog_version": request["catalog_version"],
+        })
+        code = material_error(material)
+        if code is not None:
+            return {
+                "status": "INVALID",
+                "data": {"code": code},
+            }
+        material = cast(dict[str, Any], material)
+
+        return self._save_and_propose(
+            tx,
+            request,
+            material,
+            "INITIAL_OUTREACH",
+            {
+                "request_id": request["request_id"],
+                "material_ref": material["material_ref"],
+                "catalog_version": request["catalog_version"],
+                "verdict": "QUALIFIED_FOR_PREPARATION",
+            },
         )
 
+    def _save_and_propose(self, tx, request, material, kind, data):
+        """Сохраняем исходный descriptor и ставим действие в очередь."""
+        material_ref = material["material_ref"]
+        saved = self._call("materials.save", {
+            "scope": request["scope"],
+            "request_id": request["request_id"],
+            "material": material,
+        })
+        code = save_response_error(saved, material_ref)
+        if code is not None:
+            # Выход исключением откатывает транзакцию.
+            raise InvalidPortResponse(code)
 
-# Функция находится ВНЕ класса: перед def нет пробелов.
+        proposed = self._call("dispatch.propose", {
+            "scope": request["scope"],
+            "action_id": request["request_id"],
+            "kind": kind,
+            "payload_ref": material_ref,
+        })
+        code = dispatch_response_error(proposed)
+        if code is not None:
+            raise InvalidPortResponse(code)
+
+        # В повтор кладём описание и исходные идентификаторы, не текст письма.
+        tx.put("replay", replay_key(request), {
+            "fingerprint": request_fingerprint(request),
+            "scope": request["scope"],
+            "request_id": request["request_id"],
+            "catalog_version": request["catalog_version"],
+            "material": {
+                "material_ref": material["material_ref"],
+                "sha256": material["sha256"],
+                "approved_fact_ids": list(
+                    material["approved_fact_ids"]
+                ),
+            },
+            "data": data,
+        })
+        return {
+            "status": "OK",
+            "data": data,
+        }
+
+
 def create_service(ports):
     """Точка подключения, предусмотренная контрактом."""
     return MaterialsService(ports)
