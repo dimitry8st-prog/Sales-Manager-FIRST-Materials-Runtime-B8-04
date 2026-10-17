@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 from typing import Any, ContextManager, cast
 from uuid import UUID
 
@@ -22,6 +23,24 @@ SCOPE_FIELDS = {
     "client_id", "campaign_id", "lead_id",
     "mailbox_ref", "thread_id",
 }
+
+# Только эти исключения принадлежат исходным доменным компонентам,
+# которые стоят за портами B8-04. Одного атрибута ``code`` недостаточно:
+# произвольная ошибка зависимости не должна превращаться в INVALID.
+TRUSTED_DOMAIN_ERRORS = {
+    ("sales_discovery_qualification", "QualificationError"),
+    ("reference_source.sales_discovery_qualification", "QualificationError"),
+    ("sales_template_materialization", "TemplateMaterializationError"),
+    ("reference_source.sales_template_materialization", "TemplateMaterializationError"),
+    ("sales_language_registry", "LanguageRegistryError"),
+    ("reference_source.sales_language_registry", "LanguageRegistryError"),
+    ("sales_action_locale", "ActionLocaleError"),
+    ("reference_source.sales_action_locale", "ActionLocaleError"),
+    ("sales_rules", "RuleViolation"),
+    ("reference_source.sales_rules", "RuleViolation"),
+}
+
+TRANSPORT_ERRORS = (TimeoutError, ConnectionError)
 
 
 def valid_id(value):
@@ -233,6 +252,26 @@ class InvalidPortResponse(Exception):
         self.code = code
 
 
+def trusted_domain_code(error):
+    """Возвращаем код только для известного класса исходного компонента."""
+    identity = (
+        type(error).__module__,
+        type(error).__name__,
+    )
+    if identity not in TRUSTED_DOMAIN_ERRORS:
+        return None
+
+    module = sys.modules.get(identity[0])
+    trusted_type = getattr(module, identity[1], None)
+    if type(error) is not trusted_type:
+        return None
+
+    code = getattr(error, "code", None)
+    if not valid_id(code):
+        return None
+    return code
+
+
 class MaterialsService:
     def __init__(self, ports: Any):
         # Доверенные зависимости передаются снаружи.
@@ -287,15 +326,25 @@ class MaterialsService:
             }
 
         # 6. Работаем с состоянием в пределах заданного scope.
+        body_error = None
+        body_finished = False
         try:
             context = cast(
                 ContextManager[Any],
                 transaction(request["scope"]),
             )
             with context as tx:
-                return self._execute_in_transaction(
-                    tx, operation, request
-                )
+                try:
+                    result = self._execute_in_transaction(
+                        tx, operation, request
+                    )
+                except BaseException as error:
+                    # Нужна именно личность объекта: если после него наружу
+                    # вышла другая транспортная ошибка, откат/commit неясен.
+                    body_error = error
+                    raise
+                body_finished = True
+            return result
         except PermissionError:
             return {
                 "status": "UNAUTHORIZED",
@@ -312,6 +361,29 @@ class MaterialsService:
                 "status": "INVALID",
                 "data": {"code": error.code},
             }
+        except TRANSPORT_ERRORS as error:
+            if error is body_error:
+                # Контекст уже успешно обработал исключение из тела,
+                # следовательно откат подтверждён.
+                return {
+                    "status": "DEPENDENCY_UNAVAILABLE",
+                    "data": {},
+                }
+
+            if body_finished or body_error is not None:
+                # Ошибка пришла из __exit__: результат commit/rollback
+                # неизвестен. Разрешено только чтение, но не повтор эффектов.
+                self._reread_after_uncertain_commit(request)
+                return {
+                    "status": "UNKNOWN",
+                    "data": {"request_id": request["request_id"]},
+                }
+
+            # Создать или открыть транзакцию не удалось; эффектов ещё нет.
+            return {
+                "status": "DEPENDENCY_UNAVAILABLE",
+                "data": {},
+            }
 
     def _call(self, name, request):
         """Вызываем зависимость через доверенный интерфейс."""
@@ -326,8 +398,29 @@ class MaterialsService:
             if type(exc).__name__ == "MissingDependency":
                 raise DependencyUnavailable(name) from exc
 
+            code = trusted_domain_code(exc)
+            if code is not None:
+                raise InvalidPortResponse(code) from exc
+
             # Остальные ошибки не маскируем.
             raise
+
+    def _reread_after_uncertain_commit(self, request):
+        """Проверяем scoped replay без повторения внешних эффектов."""
+        transaction = getattr(self.ports, "transaction", None)
+        if not callable(transaction):
+            return
+
+        try:
+            context = cast(
+                ContextManager[Any],
+                transaction(request["scope"]),
+            )
+            with context as tx:
+                stored_result(tx, request)
+        except Exception:
+            # Повторное чтение диагностическое: UNKNOWN остаётся UNKNOWN.
+            return
 
     def _execute_in_transaction(self, tx, operation, request):
         """Проверяем состояние, каталог, событие и материал."""
@@ -460,10 +553,7 @@ class MaterialsService:
             # Проверяем точный формат описания материала.
             code = material_error(material)
             if code is not None:
-                return {
-                    "status": "INVALID",
-                    "data": {"code": code},
-                }
+                raise InvalidPortResponse(code)
             material = cast(dict[str, Any], material)
             # Материал может использовать только разрешённые факты.
             allowed_facts = event.get("approved_fact_ids")
@@ -471,18 +561,12 @@ class MaterialsService:
                 type(allowed_facts) is not list
                 or not all(valid_id(fact) for fact in allowed_facts)
             ):
-                return {
-                    "status": "INVALID",
-                    "data": {"code": "FACT_SCOPE_MISMATCH"},
-                }
+                raise InvalidPortResponse("FACT_SCOPE_MISMATCH")
 
             if not set(material["approved_fact_ids"]).issubset(
                 set(allowed_facts)
             ):
-                return {
-                    "status": "INVALID",
-                    "data": {"code": "FACT_SCOPE_MISMATCH"},
-                }
+                raise InvalidPortResponse("FACT_SCOPE_MISMATCH")
 
             # Списки фактов сохраняют исходный порядок.
             return self._save_and_propose(
@@ -522,10 +606,7 @@ class MaterialsService:
         })
         code = material_error(material)
         if code is not None:
-            return {
-                "status": "INVALID",
-                "data": {"code": code},
-            }
+            raise InvalidPortResponse(code)
         material = cast(dict[str, Any], material)
 
         return self._save_and_propose(
