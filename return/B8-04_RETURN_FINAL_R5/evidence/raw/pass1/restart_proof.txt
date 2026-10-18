@@ -1,0 +1,10 @@
+phase=before_restart
+container_name=b8-04-r5-cp2
+container_id_and_started=4039eecec24ade1482f26e2920e91d99ce1dc1776c30027accf9298b7648afbc 2026-10-18T13:29:20.978395735Z
+command=docker restart b8-04-r5-cp2
+exit_code=0
+stdout=b8-04-r5-cp2
+phase=after_restart
+container_id_and_started=4039eecec24ade1482f26e2920e91d99ce1dc1776c30027accf9298b7648afbc 2026-10-18T13:30:08.42520404Z
+same_container=True
+reseeded_after_restart=false

@@ -1,0 +1,16 @@
+test_dependency_staging_rolls_back_with_invalid_material (test_acceptance_pg.PostgresAcceptanceTests.test_dependency_staging_rolls_back_with_invalid_material) ... ok
+test_independent_stop_and_config_sessions_use_scoped_locks (test_acceptance_pg.PostgresAcceptanceTests.test_independent_stop_and_config_sessions_use_scoped_locks) ... ok
+test_prepare_lock_first_then_stop_serializes_after_commit (test_acceptance_pg.PostgresAcceptanceTests.test_prepare_lock_first_then_stop_serializes_after_commit)
+Подготовка первой фиксирует эффект; ожидающий STOP не отменяет его. ... ok
+test_process_crash_after_real_commit_replays_without_effects (test_acceptance_pg.PostgresAcceptanceTests.test_process_crash_after_real_commit_replays_without_effects) ... ok
+test_process_crash_before_commit_rolls_back_all_effects (test_acceptance_pg.PostgresAcceptanceTests.test_process_crash_before_commit_rolls_back_all_effects) ... ok
+test_same_request_id_is_isolated_between_scopes (test_acceptance_pg.PostgresAcceptanceTests.test_same_request_id_is_isolated_between_scopes) ... ok
+test_same_scope_race_has_one_effect_chain (test_acceptance_pg.PostgresAcceptanceTests.test_same_scope_race_has_one_effect_chain) ... ok
+test_sql_constraints_reject_empty_bucket (test_acceptance_pg.PostgresAcceptanceTests.test_sql_constraints_reject_empty_bucket) ... ok
+test_stop_lock_first_makes_waiting_prepare_blocked (test_acceptance_pg.PostgresAcceptanceTests.test_stop_lock_first_makes_waiting_prepare_blocked)
+STOP держит scoped lock; подготовка ждёт и после commit получает BLOCKED. ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 6.616s
+
+OK

@@ -31,7 +31,15 @@ APPLICATION_NAME = os.environ["B8_WORKER_APPLICATION"]
 
 
 def connect():
-    return psycopg.connect(DSN, application_name=APPLICATION_NAME)
+    # Таймауты ограничивают зависший процесс, но не заменяют наблюдение блокировки.
+    return psycopg.connect(
+        DSN,
+        application_name=APPLICATION_NAME,
+        options=(
+            "-c lock_timeout=30s "
+            "-c idle_in_transaction_session_timeout=45s"
+        ),
+    )
 
 
 def control_connect():
@@ -60,6 +68,23 @@ def event_exists(event):
             ).format(sql.Identifier(SCHEMA)),
             (event,),
         ).fetchone() is not None
+
+
+def session_detail():
+    """Идентификатор сессии берём из PostgreSQL, не из текста подключения."""
+    with control_connect() as connection:
+        row = connection.execute(
+            "SELECT pid, backend_xid::text "
+            "FROM pg_stat_activity "
+            "WHERE application_name=%s AND xact_start IS NOT NULL "
+            "ORDER BY xact_start DESC",
+            (APPLICATION_NAME,),
+        ).fetchone()
+    detail = {"os_pid": os.getpid(), "observed_at": time.time()}
+    if row is not None:
+        detail["backend_pid"] = row[0]
+        detail["backend_xid"] = row[1]
+    return detail
 
 
 def wait_for(event, timeout=20):
@@ -105,7 +130,10 @@ class DispatchBarrierPorts(acceptance_pg.PostgresPorts):
         result = super().call(name, request)
         if name == "dispatch.propose":
             # super() уже перенёс staging/save/proposal в SQL-транзакцию.
-            mark(self.event, {"pid": os.getpid(), "effects_mirrored": True})
+            mark(self.event, {
+                **session_detail(),
+                "effects_mirrored": True,
+            })
             wait_for(self.release)
         return result
 
@@ -173,10 +201,55 @@ def run_prepare_ordering_barrier():
     print(json.dumps(result, sort_keys=True), flush=True)
 
 
+def run_prepare_plain():
+    value = fixture()
+    mark("prepare_started", {
+        "os_pid": os.getpid(),
+        "observed_at": time.time(),
+    })
+    backend = acceptance_pg.PostgresPorts(connect, SCHEMA, Ports(value))
+    result = create_materials_service(backend).execute(
+        value["operation"], value["request"]
+    )
+    mark("prepare_finished", {
+        "os_pid": os.getpid(),
+        "status": result["status"],
+        "observed_at": time.time(),
+    })
+    print(json.dumps(result, sort_keys=True), flush=True)
+
+
+def run_stop_hold():
+    """Удерживаем scoped lock внутри незавершённой STOP-транзакции."""
+    value = fixture()
+    mark("stop_attempt", {
+        "os_pid": os.getpid(),
+        "observed_at": time.time(),
+    })
+    backend = acceptance_pg.PostgresPorts(connect, SCHEMA, Ports(value))
+    with backend.transaction(value["fixture_scope"]) as transaction:
+        transaction.put("authority", "current", {
+            "status": "STOPPED",
+            "revision": 2,
+            "catalog_version": "v1",
+        })
+        mark("stop_locked", session_detail())
+        wait_for("release_stop", timeout=25)
+    mark("update_committed", {
+        **session_detail(),
+        "update": "STOPPED",
+    })
+    print(json.dumps({"updated": "STOPPED"}, sort_keys=True), flush=True)
+
+
 def run_state_update():
     value = fixture()
     update = os.environ["B8_WORKER_UPDATE"]
-    mark("update_attempt", {"pid": os.getpid(), "update": update})
+    mark("update_attempt", {
+        "os_pid": os.getpid(),
+        "update": update,
+        "observed_at": time.time(),
+    })
     backend = acceptance_pg.PostgresPorts(
         connect, SCHEMA, Ports(value)
     )
@@ -204,6 +277,10 @@ elif MODE == "crash_after_commit":
     run_prepare_after_commit_crash()
 elif MODE == "prepare_ordering":
     run_prepare_ordering_barrier()
+elif MODE == "prepare_plain":
+    run_prepare_plain()
+elif MODE == "stop_hold":
+    run_stop_hold()
 elif MODE == "update_state":
     run_state_update()
 else:

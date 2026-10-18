@@ -1,0 +1,66 @@
+test_dependency_staging_rolls_back_with_invalid_material (test_acceptance_pg.PostgresAcceptanceTests.test_dependency_staging_rolls_back_with_invalid_material) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_independent_stop_and_config_sessions_use_scoped_locks (test_acceptance_pg.PostgresAcceptanceTests.test_independent_stop_and_config_sessions_use_scoped_locks) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_prepare_lock_first_then_stop_serializes_after_commit (test_acceptance_pg.PostgresAcceptanceTests.test_prepare_lock_first_then_stop_serializes_after_commit)
+Подготовка первой фиксирует эффект; ожидающий STOP не отменяет его. ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_process_crash_after_real_commit_replays_without_effects (test_acceptance_pg.PostgresAcceptanceTests.test_process_crash_after_real_commit_replays_without_effects) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_process_crash_before_commit_rolls_back_all_effects (test_acceptance_pg.PostgresAcceptanceTests.test_process_crash_before_commit_rolls_back_all_effects) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_same_request_id_is_isolated_between_scopes (test_acceptance_pg.PostgresAcceptanceTests.test_same_request_id_is_isolated_between_scopes) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_same_scope_race_has_one_effect_chain (test_acceptance_pg.PostgresAcceptanceTests.test_same_scope_race_has_one_effect_chain) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_sql_constraints_reject_empty_bucket (test_acceptance_pg.PostgresAcceptanceTests.test_sql_constraints_reject_empty_bucket) ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_stop_lock_first_makes_waiting_prepare_blocked (test_acceptance_pg.PostgresAcceptanceTests.test_stop_lock_first_makes_waiting_prepare_blocked)
+STOP держит scoped lock; подготовка ждёт и после commit получает BLOCKED. ... skipped 'B8_TEST_DSN is required for real PostgreSQL tests'
+test_prepare_dispatch_catalog_change_rolls_back (test_api.DispatchFinalStateTests.test_prepare_dispatch_catalog_change_rolls_back) ... ok
+test_prepare_dispatch_terminal_authority_rolls_back (test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) ... ok
+test_prepare_initial_dispatch_catalog_change_rolls_back (test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_catalog_change_rolls_back) ... ok
+test_prepare_initial_dispatch_terminal_authority_rolls_back (test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) ... ok
+test_terminal_authority_wins_over_simultaneous_catalog_change (test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) ... ok
+test_invalid_material_descriptor (test_api.MaterialDescriptorTests.test_invalid_material_descriptor) ... ok
+test_invalid_material_fact_ids (test_api.MaterialDescriptorTests.test_invalid_material_fact_ids) ... ok
+test_invalid_material_hash (test_api.MaterialDescriptorTests.test_invalid_material_hash) ... ok
+test_valid_material_descriptor (test_api.MaterialDescriptorTests.test_valid_material_descriptor) ... ok
+test_arbitrary_code_exception_is_not_a_domain_error (test_api.MaterialsServiceTests.test_arbitrary_code_exception_is_not_a_domain_error) ... ok
+test_catalog_change_during_materialization_rolls_back (test_api.MaterialsServiceTests.test_catalog_change_during_materialization_rolls_back) ... ok
+test_catalog_change_during_save_rolls_back_before_dispatch (test_api.MaterialsServiceTests.test_catalog_change_during_save_rolls_back_before_dispatch) ... ok
+test_catalog_dependency_unavailable (test_api.MaterialsServiceTests.test_catalog_dependency_unavailable) ... ok
+test_catalog_version_mismatch (test_api.MaterialsServiceTests.test_catalog_version_mismatch) ... ok
+test_changed_request_conflicts_without_new_effects (test_api.MaterialsServiceTests.test_changed_request_conflicts_without_new_effects) ... ok
+test_event_identity_mismatch (test_api.MaterialsServiceTests.test_event_identity_mismatch) ... ok
+test_event_scope_mismatch (test_api.MaterialsServiceTests.test_event_scope_mismatch) ... ok
+test_extra_field_before_authentication (test_api.MaterialsServiceTests.test_extra_field_before_authentication) ... ok
+test_foreign_client (test_api.MaterialsServiceTests.test_foreign_client) ... ok
+test_foreign_facts_after_staging_fully_roll_back (test_api.MaterialsServiceTests.test_foreign_facts_after_staging_fully_roll_back) ... ok
+test_initial_invalid_descriptor_after_staging_rolls_back (test_api.MaterialsServiceTests.test_initial_invalid_descriptor_after_staging_rolls_back) ... ok
+test_initial_needs_review_does_not_save (test_api.MaterialsServiceTests.test_initial_needs_review_does_not_save) ... ok
+test_initial_qualification_saves_and_queues (test_api.MaterialsServiceTests.test_initial_qualification_saves_and_queues) ... ok
+test_invalid_catalog_response (test_api.MaterialsServiceTests.test_invalid_catalog_response) ... ok
+test_invalid_descriptor_after_staging_fully_rolls_back (test_api.MaterialsServiceTests.test_invalid_descriptor_after_staging_fully_rolls_back) ... ok
+test_invalid_dispatch_response_rolls_back (test_api.MaterialsServiceTests.test_invalid_dispatch_response_rolls_back) ... ok
+test_invalid_event_response (test_api.MaterialsServiceTests.test_invalid_event_response) ... ok
+test_invalid_material_response_rejected (test_api.MaterialsServiceTests.test_invalid_material_response_rejected) ... ok
+test_invalid_materials_save_response_rolls_back (test_api.MaterialsServiceTests.test_invalid_materials_save_response_rolls_back) ... ok
+test_invalid_state_revision_rejected (test_api.MaterialsServiceTests.test_invalid_state_revision_rejected) ... ok
+test_material_with_foreign_facts_rejected (test_api.MaterialsServiceTests.test_material_with_foreign_facts_rejected) ... ok
+test_materials_save_exact_request_then_dispatch (test_api.MaterialsServiceTests.test_materials_save_exact_request_then_dispatch) ... ok
+test_materials_save_ref_mismatch_rolls_back (test_api.MaterialsServiceTests.test_materials_save_ref_mismatch_rolls_back) ... ok
+test_missing_call_port_precedes_terminal_state (test_api.MaterialsServiceTests.test_missing_call_port_precedes_terminal_state) ... ok
+test_missing_capability (test_api.MaterialsServiceTests.test_missing_capability) ... ok
+test_missing_field (test_api.MaterialsServiceTests.test_missing_field) ... ok
+test_missing_materials_save_rolls_back (test_api.MaterialsServiceTests.test_missing_materials_save_rolls_back) ... ok
+test_missing_state (test_api.MaterialsServiceTests.test_missing_state) ... ok
+test_missing_transaction (test_api.MaterialsServiceTests.test_missing_transaction) ... ok
+test_request_must_be_dictionary (test_api.MaterialsServiceTests.test_request_must_be_dictionary) ... ok
+test_same_request_replays_without_new_effects (test_api.MaterialsServiceTests.test_same_request_replays_without_new_effects) ... ok
+test_source_domain_error_becomes_invalid_and_rolls_back (test_api.MaterialsServiceTests.test_source_domain_error_becomes_invalid_and_rolls_back) ... ok
+test_stop_during_materialization_rolls_back_before_save (test_api.MaterialsServiceTests.test_stop_during_materialization_rolls_back_before_save) ... ok
+test_terminal_states_block_without_effects (test_api.MaterialsServiceTests.test_terminal_states_block_without_effects) ... ok
+test_transport_error_with_confirmed_rollback_is_not_retried (test_api.MaterialsServiceTests.test_transport_error_with_confirmed_rollback_is_not_retried) ... ok
+test_unapproved_catalog_blocked (test_api.MaterialsServiceTests.test_unapproved_catalog_blocked) ... ok
+test_unauthenticated (test_api.MaterialsServiceTests.test_unauthenticated) ... ok
+test_uncertain_commit_returns_unknown_without_retrying_effects (test_api.MaterialsServiceTests.test_uncertain_commit_returns_unknown_without_retrying_effects) ... ok
+test_unknown_operation (test_api.MaterialsServiceTests.test_unknown_operation) ... ok
+test_unsuitable_events_blocked_without_materials (test_api.MaterialsServiceTests.test_unsuitable_events_blocked_without_materials) ... ok
+
+----------------------------------------------------------------------
+Ran 59 tests in 0.079s
+
+OK (skipped=9)

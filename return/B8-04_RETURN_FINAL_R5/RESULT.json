@@ -1,0 +1,67 @@
+{
+  "package": "B8-04",
+  "contract_revision": "R3",
+  "return_revision": "R5",
+  "return_kind": "IMPLEMENTER_FINAL_RETURN",
+  "current_return": "R5",
+  "historical_returns": [
+    "R3",
+    "R4"
+  ],
+  "ready_for_integrator": true,
+  "whole_system_accepted": false,
+  "checks": {
+    "repeated_runs": 2,
+    "unit_discovery": {
+      "status": "PASS",
+      "exit_code_pass1": 0,
+      "exit_code_pass2": 0,
+      "discovered": 59,
+      "executed_without_dsn": 50,
+      "skipped_without_dsn": 9
+    },
+    "cp0": {
+      "status": "PASS",
+      "exit_code_pass1": 0,
+      "exit_code_pass2": 0,
+      "mismatches": 0
+    },
+    "cp1": {
+      "status": "PASS",
+      "exit_code_pass1": 0,
+      "exit_code_pass2": 0,
+      "cases": 19
+    },
+    "cp2": {
+      "status": "PASS",
+      "postgres_tests": 9,
+      "exit_code_pass1": 0,
+      "exit_code_pass2": 0,
+      "before_restart_exit_code_pass1": 0,
+      "after_restart_exit_code_pass1": 0,
+      "before_restart_exit_code_pass2": 0,
+      "after_restart_exit_code_pass2": 0,
+      "same_container": true,
+      "reseeded_after_restart": false,
+      "stop_holds_lock_first": "PASS",
+      "prepare_holds_lock_first": "PASS",
+      "process_crash_before_commit": "PASS",
+      "process_crash_after_commit": "PASS"
+    },
+    "patch_clean_apply": {
+      "status": "PASS",
+      "matching_files": 7
+    },
+    "cp3": {
+      "status": "NOT_RUN",
+      "owner": "integrator"
+    },
+    "cp4": {
+      "status": "NOT_RUN",
+      "owner": "independent auditor"
+    }
+  },
+  "secrets_in_return": false,
+  "git_push_performed": false,
+  "zip_sent_to_recipient": false
+}

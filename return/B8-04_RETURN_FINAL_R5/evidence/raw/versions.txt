@@ -1,0 +1,7 @@
+Python 3.12.8
+psycopg=3.3.5
+git version 2.56.0.windows.2
+postgres (PostgreSQL) 16.15 (Debian 16.15-1.pgdg13+2)
+container=b8-04-r5-cp2
+auth=trust
+dsn_recorded=false

@@ -157,14 +157,38 @@ class PostgresAcceptanceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def finish_worker(self, process, timeout=15):
-        stdout, stderr = process.communicate(timeout=timeout)
+    def public_text(self, value):
+        text = "" if value is None else str(value)
+        secret = os.environ.get("B8_TEST_DSN", "")
+        if secret:
+            text = text.replace(secret, "<dsn-redacted>")
+        return text
+
+    def finish_worker(self, process, timeout=20):
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=10)
+        stdout = self.public_text(stdout)
+        stderr = self.public_text(stderr)
         if stdout:
             print("worker stdout:", stdout.strip())
         if stderr:
             print("worker stderr:", stderr.strip())
-        self.assertEqual(process.returncode, 0)
+        self.assertEqual(process.returncode, 0, stderr)
         return stdout
+
+    def stop_processes(self, processes):
+        for process in processes:
+            if process is None or process.poll() is not None:
+                continue
+            process.kill()
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
 
     def kill_worker(self, process):
         process.kill()
@@ -185,6 +209,99 @@ class PostgresAcceptanceTests(unittest.TestCase):
                 (application,),
             ).fetchone()
         return row
+
+    def effect_counts(self, schema, scope):
+        return {
+            bucket: self.state_count(schema, scope, bucket)
+            for bucket in (
+                "staging", "materials", "proposals", "replay"
+            )
+        }
+
+    def blocking_snapshot(self, waiter, holder):
+        """Кто реально ждёт scoped lock и какая сессия его держит."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT blocked_activity.pid,
+                       blocked_activity.state,
+                       blocked_activity.wait_event_type,
+                       blocked_activity.wait_event,
+                       blocked_activity.xact_start IS NOT NULL,
+                       blocked_activity.backend_xid::text,
+                       blocking_activity.pid,
+                       blocking_activity.xact_start IS NOT NULL,
+                       blocking_activity.backend_xid::text,
+                       blocked_locks.locktype,
+                       blocked_locks.mode,
+                       blocking_locks.mode
+                FROM pg_locks blocked_locks
+                JOIN pg_stat_activity blocked_activity
+                  ON blocked_activity.pid = blocked_locks.pid
+                JOIN pg_locks blocking_locks
+                  ON blocking_locks.locktype = blocked_locks.locktype
+                 AND blocking_locks.database
+                     IS NOT DISTINCT FROM blocked_locks.database
+                 AND blocking_locks.relation
+                     IS NOT DISTINCT FROM blocked_locks.relation
+                 AND blocking_locks.page
+                     IS NOT DISTINCT FROM blocked_locks.page
+                 AND blocking_locks.tuple
+                     IS NOT DISTINCT FROM blocked_locks.tuple
+                 AND blocking_locks.virtualxid
+                     IS NOT DISTINCT FROM blocked_locks.virtualxid
+                 AND blocking_locks.transactionid
+                     IS NOT DISTINCT FROM blocked_locks.transactionid
+                 AND blocking_locks.classid
+                     IS NOT DISTINCT FROM blocked_locks.classid
+                 AND blocking_locks.objid
+                     IS NOT DISTINCT FROM blocked_locks.objid
+                 AND blocking_locks.objsubid
+                     IS NOT DISTINCT FROM blocked_locks.objsubid
+                 AND blocking_locks.pid <> blocked_locks.pid
+                 AND blocking_locks.granted
+                JOIN pg_stat_activity blocking_activity
+                  ON blocking_activity.pid = blocking_locks.pid
+                WHERE NOT blocked_locks.granted
+                  AND blocked_activity.application_name = %s
+                  AND blocking_activity.application_name = %s
+                """,
+                (waiter, holder),
+            ).fetchall()
+        return [
+            {
+                "blocked_pid": row[0],
+                "blocked_state": row[1],
+                "wait_event_type": row[2],
+                "wait_event": row[3],
+                "blocked_transaction_open": row[4],
+                "blocked_xid": row[5],
+                "blocking_pid": row[6],
+                "blocking_transaction_open": row[7],
+                "blocking_xid": row[8],
+                "locktype": row[9],
+                "blocked_mode": row[10],
+                "blocking_mode": row[11],
+            }
+            for row in rows
+        ]
+
+    def wait_for_lock(self, waiter, holder, timeout=8):
+        deadline = time.monotonic() + timeout
+        last = []
+        while time.monotonic() < deadline:
+            last = self.blocking_snapshot(waiter, holder)
+            if any(
+                item["wait_event_type"] == "Lock"
+                and item["blocking_transaction_open"]
+                for item in last
+            ):
+                return last
+            time.sleep(0.05)
+        self.fail(
+            "scoped lock wait was not observed: "
+            + json.dumps(last, ensure_ascii=False, default=str)
+        )
 
     def test_dependency_staging_rolls_back_with_invalid_material(self):
         fixture = copy.deepcopy(self.fixture)
@@ -596,6 +713,170 @@ class PostgresAcceptanceTests(unittest.TestCase):
             "updater_stdout": updater_stdout.strip(),
             "final_catalog": final_catalog,
             "new_request_status": stale_result["status"],
+        }, ensure_ascii=False, default=str, sort_keys=True))
+
+    def test_stop_lock_first_makes_waiting_prepare_blocked(self):
+        """STOP держит scoped lock; подготовка ждёт и после commit получает BLOCKED."""
+        fixture = copy.deepcopy(self.fixture)
+        schema = self.schema("stop_holds")
+        scope = fixture["fixture_scope"]
+        self.setup_control(schema, fixture)
+        stop = self.start_worker(
+            schema, "stop_hold", "b804-stop-holder"
+        )
+        prepare = None
+        try:
+            stop_locked = self.wait_control(schema, "stop_locked")
+            self.assertEqual(
+                self.state_value(schema, scope, "authority", "current")[
+                    "status"
+                ],
+                "ACTIVE",
+            )
+            prepare = self.start_worker(
+                schema, "prepare_plain", "b804-prepare-waiter"
+            )
+            self.wait_control(schema, "prepare_started")
+            lock_wait = self.wait_for_lock(
+                "b804-prepare-waiter", "b804-stop-holder"
+            )
+            self.assertIsNone(
+                self.control_event(schema, "prepare_finished")
+            )
+            self.assertEqual(
+                self.effect_counts(schema, scope),
+                {
+                    "staging": 0,
+                    "materials": 0,
+                    "proposals": 0,
+                    "replay": 0,
+                },
+            )
+            self.mark_control(schema, "release_stop")
+            self.wait_control(schema, "update_committed")
+            prepare_stdout = self.finish_worker(prepare)
+            stop_stdout = self.finish_worker(stop)
+        finally:
+            self.stop_processes((prepare, stop))
+
+        prepare_result = json.loads(prepare_stdout)
+        self.assertEqual(prepare_result, {"status": "BLOCKED", "data": {}})
+        self.assertEqual(
+            self.state_value(schema, scope, "authority", "current")[
+                "status"
+            ],
+            "STOPPED",
+        )
+        self.assertEqual(
+            self.effect_counts(schema, scope),
+            {
+                "staging": 0,
+                "materials": 0,
+                "proposals": 0,
+                "replay": 0,
+            },
+        )
+        print("stop_holds_lock", json.dumps({
+            "stop_locked": stop_locked,
+            "lock_wait": lock_wait,
+            "prepare_result": prepare_result,
+            "stop_stdout": stop_stdout.strip(),
+            "final_authority": self.state_value(
+                schema, scope, "authority", "current"
+            ),
+            "final_effects": self.effect_counts(schema, scope),
+        }, ensure_ascii=False, default=str, sort_keys=True))
+
+    def test_prepare_lock_first_then_stop_serializes_after_commit(self):
+        """Подготовка первой фиксирует эффект; ожидающий STOP не отменяет его."""
+        fixture = copy.deepcopy(self.fixture)
+        schema = self.schema("prepare_holds")
+        scope = fixture["fixture_scope"]
+        self.setup_control(schema, fixture)
+        prepare = self.start_worker(
+            schema, "prepare_ordering", "b804-prepare-holder"
+        )
+        stop = None
+        try:
+            prepare_ready = self.wait_control(
+                schema, "prepare_after_dispatch"
+            )
+            self.assertEqual(
+                self.effect_counts(schema, scope),
+                {
+                    "staging": 0,
+                    "materials": 0,
+                    "proposals": 0,
+                    "replay": 0,
+                },
+            )
+            self.assertEqual(
+                self.state_value(schema, scope, "authority", "current")[
+                    "status"
+                ],
+                "ACTIVE",
+            )
+            stop = self.start_worker(
+                schema,
+                "update_state",
+                "b804-stop-waiter",
+                update="STOPPED",
+            )
+            self.wait_control(schema, "update_attempt")
+            lock_wait = self.wait_for_lock(
+                "b804-stop-waiter", "b804-prepare-holder"
+            )
+            self.assertIsNone(
+                self.control_event(schema, "update_committed")
+            )
+            self.assertEqual(
+                self.state_value(schema, scope, "authority", "current")[
+                    "status"
+                ],
+                "ACTIVE",
+            )
+            self.mark_control(schema, "release_prepare")
+            prepare_stdout = self.finish_worker(prepare)
+            committed_effects = self.effect_counts(schema, scope)
+            self.wait_control(schema, "update_committed")
+            stop_stdout = self.finish_worker(stop)
+        finally:
+            self.stop_processes((prepare, stop))
+
+        self.assertEqual(json.loads(prepare_stdout)["status"], "OK")
+        self.assertEqual(committed_effects, {
+            "staging": 1,
+            "materials": 1,
+            "proposals": 1,
+            "replay": 1,
+        })
+        self.assertEqual(
+            self.state_value(schema, scope, "authority", "current")[
+                "status"
+            ],
+            "STOPPED",
+        )
+        follow = copy.deepcopy(fixture)
+        follow["request"]["request_id"] = "request-after-stop"
+        follow_ports = self.Ports(follow)
+        follow_result = self.pg.create_service(
+            self.connect, schema, follow_ports
+        ).execute(follow["operation"], follow["request"])
+        self.assertEqual(follow_result, {"status": "BLOCKED", "data": {}})
+        self.assertEqual(follow_ports.calls, [])
+        self.assertEqual(self.effect_counts(schema, scope), committed_effects)
+        print("prepare_holds_lock", json.dumps({
+            "prepare_ready": prepare_ready,
+            "lock_wait": lock_wait,
+            "prepare_status": json.loads(prepare_stdout)["status"],
+            "stop_stdout": stop_stdout.strip(),
+            "committed_effects": committed_effects,
+            "final_authority": self.state_value(
+                schema, scope, "authority", "current"
+            ),
+            "followup_status": follow_result["status"],
+            "followup_calls": follow_ports.calls,
+            "effects_after_followup": self.effect_counts(schema, scope),
         }, ensure_ascii=False, default=str, sort_keys=True))
 
 

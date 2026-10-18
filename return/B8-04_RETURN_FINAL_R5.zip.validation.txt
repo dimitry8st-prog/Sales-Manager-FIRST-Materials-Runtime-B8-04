@@ -1,0 +1,37 @@
+{
+  "zip": "C:\\Users\\user\\Desktop\\СТАЖЁР\\B8-04_R3\\return\\B8-04_RETURN_FINAL_R5.zip",
+  "sha256": "be389ae8b3d26cb7c67945e612a631ca82a14277acb864b704606ea778c8d56f",
+  "first": {
+    "index": 1,
+    "entries": 60,
+    "bad_names": [],
+    "roots": [
+      "B8-04_RETURN_FINAL_R5"
+    ],
+    "hash_bad": [],
+    "secret_hits": [],
+    "patch_check": 0,
+    "patch_apply": 0,
+    "byte_mismatches": [],
+    "unit_exit": 0,
+    "cp1_exit": 0,
+    "zip_sha256": "be389ae8b3d26cb7c67945e612a631ca82a14277acb864b704606ea778c8d56f"
+  },
+  "second": {
+    "index": 2,
+    "entries": 60,
+    "bad_names": [],
+    "roots": [
+      "B8-04_RETURN_FINAL_R5"
+    ],
+    "hash_bad": [],
+    "secret_hits": [],
+    "patch_check": 0,
+    "patch_apply": 0,
+    "byte_mismatches": [],
+    "unit_exit": 0,
+    "cp1_exit": 0,
+    "zip_sha256": "be389ae8b3d26cb7c67945e612a631ca82a14277acb864b704606ea778c8d56f"
+  },
+  "ok": true
+}
