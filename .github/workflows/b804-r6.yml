@@ -1,0 +1,26 @@
+name: B8-04 R6 PostgreSQL acceptance
+on:
+  push:
+    branches: ["fix/r6-postgresql-errors"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "psycopg[binary]==3.3.6"
+      - run: python return/tools/verify_r6.py --repo .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: B8-04-R6-return-and-evidence
+          path: |
+            return/B8-04_RETURN_FINAL_R6.zip
+            return/B8-04_RETURN_FINAL_R6.zip.validation.json
+            return/B8-04_RETURN_FINAL_R6/evidence/
+          if-no-files-found: error

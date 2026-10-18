@@ -47,6 +47,28 @@ def _json(value):
     )
 
 
+def _rollback_quietly(connection):
+    """Cleanup до начала эффектов не должен заменять причину отказа."""
+    if connection is not None:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+
+
+def _close_quietly(connection):
+    """Освобождение ресурса не меняет уже установленный исход транзакции.
+
+    Здесь нет retry, commit или повторного вызова зависимости. Ошибка close
+    не доказывает потерю уже полученного подтверждения commit/rollback.
+    """
+    if connection is not None:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
 def initialize(connect_factory, schema):
     """Создаём только собственную схему и таблицы B8-04."""
     from psycopg import sql
@@ -55,15 +77,16 @@ def initialize(connect_factory, schema):
     template = _MIGRATION.read_text(encoding="utf-8")
     statement = sql.SQL(template).format(schema=identifier)
 
-    connection = connect_factory()
+    connection = None
     try:
+        connection = connect_factory()
         connection.execute(statement)
         connection.commit()
     except BaseException:
-        connection.rollback()
+        _rollback_quietly(connection)
         raise
     finally:
-        connection.close()
+        _close_quietly(connection)
 
 
 def seed(connect_factory, schema, fixture):
@@ -76,8 +99,9 @@ def seed(connect_factory, schema, fixture):
     scope_key = _scope_key(scope)
     state = fixture.get("seed", {})
 
-    connection = connect_factory()
+    connection = None
     try:
+        connection = connect_factory()
         connection.execute(
             sql.SQL("DELETE FROM {}.state").format(identifier)
         )
@@ -102,10 +126,10 @@ def seed(connect_factory, schema, fixture):
                 )
         connection.commit()
     except BaseException:
-        connection.rollback()
+        _rollback_quietly(connection)
         raise
     finally:
-        connection.close()
+        _close_quietly(connection)
 
 
 class PostgresTransaction:
@@ -119,13 +143,15 @@ class PostgresTransaction:
         self._delegate_writes = None
 
     def __enter__(self):
-        from psycopg import sql
+        from psycopg import Error, sql
 
         if self.owner._active is not None:
             raise RuntimeError("nested B8-04 transactions are forbidden")
 
-        self.connection = self.owner.connect_factory()
         try:
+            # Соединение может не быть создано вовсе. До успешного входа
+            # в контекст бизнес-порты и их эффекты ещё не вызываются.
+            self.connection = self.owner.connect_factory()
             # READ COMMITTED здесь намеренно сочетается с FOR UPDATE.
             # Ожидающий запрос после снятия блокировки обязан увидеть replay,
             # который только что зафиксировал первый запрос. SERIALIZABLE
@@ -147,34 +173,32 @@ class PostgresTransaction:
                 ).format(self.owner.identifier),
                 (self.scope_key,),
             ).fetchone()
+
+            delegate = self.owner.delegate
+            if hasattr(delegate, "state"):
+                self._delegate_state = copy.deepcopy(delegate.state)
+            if hasattr(delegate, "writes"):
+                self._delegate_writes = len(delegate.writes)
         except BaseException as error:
-            try:
-                self.connection.rollback()
-            finally:
-                self.connection.close()
-            self.connection = None
-            if type(error).__module__.startswith("psycopg"):
+            _rollback_quietly(self.connection)
+            self._release()
+            if isinstance(error, Error):
                 raise ConnectionError(
                     "PostgreSQL transaction could not be opened"
                 ) from error
             raise
 
-        delegate = self.owner.delegate
-        if hasattr(delegate, "state"):
-            self._delegate_state = copy.deepcopy(delegate.state)
-        if hasattr(delegate, "writes"):
-            self._delegate_writes = len(delegate.writes)
         self.owner._active = self
         return self
 
     def __exit__(self, exc_type, exc, tb):
         connection = self.connection
-        self.owner._active = None
         try:
             if exc_type is not None:
                 try:
                     connection.rollback()
                 except Exception as rollback_error:
+                    self._restore_delegate()
                     raise TimeoutError(
                         "transaction rollback outcome is unknown"
                     ) from rollback_error
@@ -190,8 +214,17 @@ class PostgresTransaction:
                 ) from commit_error
             return False
         finally:
-            connection.close()
-            self.connection = None
+            self._release()
+
+    def _release(self):
+        """Отсоединяем завершённую/повреждённую сессию на любом пути."""
+        connection = self.connection
+        self.connection = None
+        if self.owner._active is self:
+            self.owner._active = None
+        self._delegate_state = None
+        self._delegate_writes = None
+        _close_quietly(connection)
 
     def _restore_delegate(self):
         delegate = self.owner.delegate
@@ -251,10 +284,12 @@ class PostgresTransaction:
 
     def _execute(self, statement, parameters):
         """DB-сбой в теле откатится и станет публичной ошибкой зависимости."""
+        from psycopg import Error
+
         try:
             return self.connection.execute(statement, parameters)
         except Exception as error:
-            if type(error).__module__.startswith("psycopg"):
+            if isinstance(error, Error):
                 raise ConnectionError("PostgreSQL statement failed") from error
             raise
 
