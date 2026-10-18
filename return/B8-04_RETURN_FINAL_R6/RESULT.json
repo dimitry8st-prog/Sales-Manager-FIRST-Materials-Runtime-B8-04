@@ -1,0 +1,129 @@
+{
+  "revision": "R6",
+  "status": "PASS",
+  "started_utc": "2026-10-18T14:10:28.264612+00:00",
+  "CP0": "PASS",
+  "CP1": "PASS",
+  "CP2": "PASS",
+  "CP3": "NOT_RUN",
+  "CP4": "NOT_RUN",
+  "NO_OUTBOUND": true,
+  "integration_status": "NOT_CONNECTED",
+  "passes": [
+    {
+      "status": "PASS",
+      "protected": {
+        "protected_files": 140,
+        "changed_files": []
+      },
+      "environment": "disposable PostgreSQL 17",
+      "unit_without_dsn": {
+        "tests": 73,
+        "skips_allowed": true,
+        "exit_code": 0
+      },
+      "pg_error_regressions": {
+        "tests": 7,
+        "skips_allowed": false,
+        "exit_code": 0
+      },
+      "original_pg_tests": {
+        "tests": 9,
+        "skips_allowed": false,
+        "exit_code": 0
+      },
+      "real_pg_cleanup_tests": {
+        "tests": 7,
+        "skips_allowed": false,
+        "exit_code": 0
+      },
+      "restart_proof": {
+        "before": {
+          "system_identifier": "7698010061629759533",
+          "postmaster_started": "2026-10-18 14:10:38.329354+00",
+          "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+        },
+        "after": {
+          "system_identifier": "7698010061629759533",
+          "postmaster_started": "2026-10-18 14:10:43.11527+00",
+          "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+        },
+        "same_container": "b804-r6-1-7229135107",
+        "after_restart_seed_called_by_runner": false
+      },
+      "protected_after": {
+        "protected_files": 140,
+        "changed_files": []
+      }
+    },
+    {
+      "status": "PASS",
+      "protected": {
+        "protected_files": 140,
+        "changed_files": []
+      },
+      "environment": "disposable PostgreSQL 17",
+      "unit_without_dsn": {
+        "tests": 73,
+        "skips_allowed": true,
+        "exit_code": 0
+      },
+      "pg_error_regressions": {
+        "tests": 7,
+        "skips_allowed": false,
+        "exit_code": 0
+      },
+      "original_pg_tests": {
+        "tests": 9,
+        "skips_allowed": false,
+        "exit_code": 0
+      },
+      "real_pg_cleanup_tests": {
+        "tests": 7,
+        "skips_allowed": false,
+        "exit_code": 0
+      },
+      "restart_proof": {
+        "before": {
+          "system_identifier": "7698010094834393132",
+          "postmaster_started": "2026-10-18 14:10:46.028309+00",
+          "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+        },
+        "after": {
+          "system_identifier": "7698010094834393132",
+          "postmaster_started": "2026-10-18 14:10:50.821975+00",
+          "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+        },
+        "same_container": "b804-r6-2-aa8c5f637b",
+        "after_restart_seed_called_by_runner": false
+      },
+      "protected_after": {
+        "protected_files": 140,
+        "changed_files": []
+      }
+    }
+  ],
+  "limitations": [
+    "CP2 uses synthetic owner ports; production dependency/native gates not installed.",
+    "CP3 belongs to integrator; CP4 belongs to independent auditor."
+  ],
+  "issued_archive_sha256": "2d986b21b083a979583968cb0cd7c5e4b0a88f4b6128337287672a1f460a74d6",
+  "patch_reproduction": {
+    "status": "PASS",
+    "files_reproduced": 9,
+    "protected_files": 140,
+    "sha256": "81095e10567f236978a27c6145913c81706fe3d73c3ff84576854581ef00c7cf"
+  },
+  "finished_utc": "2026-10-18T14:10:51.471968+00:00",
+  "candidate_sha256": {
+    "solution/first_materials_runtime/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "solution/first_materials_runtime/acceptance_pg.py": "cc73f65832dbcdc658068335f8055c42a014966ae80100d77738462a125b9fd3",
+    "solution/first_materials_runtime/api.py": "b03f82b1d7081dc7f44b88dc05afd95f1d0b53a3cb7568cf1d15d41ef996d8b5",
+    "solution/first_materials_runtime/migrations/0001.sql": "e838a2b6b9f5327d35232935be4321ac131cac3d45e4b2277ddc61721df3c294",
+    "tests/first_materials_runtime/pg_worker.py": "ccffa5d38e3947b8a787987de6a6d5543ebce846b10d531dfeb02fee51736efd",
+    "tests/first_materials_runtime/test_acceptance_pg.py": "e328960653f38be32d300911f21877fe6683bbbc60f1b21a14ebfdcc0410d8c2",
+    "tests/first_materials_runtime/test_api.py": "831a754b4c52cfd7013a199879e2fe4621c62328335e8069a86ad4c6d4e01d63",
+    "tests/first_materials_runtime/test_pg_cleanup_real.py": "f3b44a8b9ce0da5d093c037d6342cb4a061cfd5488a84deb5f322a86672f88aa",
+    "tests/first_materials_runtime/test_pg_failures.py": "e0b8b7a0d4daed296f5a1a48ed093c6ef8def51b27f67c2f02c8db662ce711fe"
+  }
+}

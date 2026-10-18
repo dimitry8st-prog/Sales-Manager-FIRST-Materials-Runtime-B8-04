@@ -1,0 +1,15 @@
+{
+  "label": "versions/docker",
+  "command": [
+    "docker",
+    "version"
+  ],
+  "cwd": "/home/runner/work/Sales-Manager-FIRST-Materials-Runtime-B8-04/Sales-Manager-FIRST-Materials-Runtime-B8-04",
+  "started_utc": "2026-10-18T14:10:28.577162+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {},
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:28.691504+00:00",
+  "stdout": "evidence/versions/docker/stdout.log",
+  "stderr": "evidence/versions/docker/stderr.log"
+}

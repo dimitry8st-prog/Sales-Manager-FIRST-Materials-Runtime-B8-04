@@ -1,0 +1,12 @@
+test_body_transport_rollback_confirmed_close_fails (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_body_transport_rollback_confirmed_close_fails) ... ok
+test_commit_confirmed_close_fails_preserves_ok_and_replay (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_commit_confirmed_close_fails_preserves_ok_and_replay) ... ok
+test_connect_operational_error_before_effects (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_connect_operational_error_before_effects) ... ok
+test_entry_error_with_rollback_and_close_errors_is_dependency_unavailable (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_entry_error_with_rollback_and_close_errors_is_dependency_unavailable) ... ok
+test_rollback_confirmed_close_fails_preserves_stale (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_rollback_confirmed_close_fails_preserves_stale) ... ok
+test_unknown_commit_close_error_does_not_repeat_effects (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_unknown_commit_close_error_does_not_repeat_effects) ... ok
+test_unknown_rollback_close_error_does_not_repeat_effects (test_pg_cleanup_real.PostgresCleanupRegressionTests.test_unknown_rollback_close_error_does_not_repeat_effects) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.518s
+
+OK

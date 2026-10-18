@@ -1,0 +1,26 @@
+# Requirement → code → test → raw evidence
+
+| Requirement | Code | Test | Raw logs (each pass_1, pass_2) |
+|---|---|---|---|
+| Connection failure before transaction → DEPENDENCY_UNAVAILABLE, no effects | `solution/first_materials_runtime/api.py`; `solution/first_materials_runtime/acceptance_pg.py` | `tests/first_materials_runtime/test_pg_failures.py` | `evidence/pass_1/pg_error_regressions/stdout.log`, `evidence/pass_1/pg_error_regressions/stderr.log`; `evidence/pass_2/pg_error_regressions/stdout.log`, `evidence/pass_2/pg_error_regressions/stderr.log` |
+| Cleanup cannot overwrite commit/rollback or UNKNOWN; adapter reusable | `solution/first_materials_runtime/api.py`; `solution/first_materials_runtime/acceptance_pg.py` | `tests/first_materials_runtime/test_pg_failures.py`; `tests/first_materials_runtime/test_pg_cleanup_real.py` | `evidence/pass_1/pg_error_regressions/stdout.log`, `evidence/pass_1/pg_error_regressions/stderr.log`; `evidence/pass_1/real_pg_cleanup_tests/stdout.log`, `evidence/pass_1/real_pg_cleanup_tests/stderr.log`; `evidence/pass_2/pg_error_regressions/stdout.log`, `evidence/pass_2/pg_error_regressions/stderr.log`; `evidence/pass_2/real_pg_cleanup_tests/stdout.log`, `evidence/pass_2/real_pg_cleanup_tests/stderr.log` |
+| Original 9 PG cases: both STOP orders, crash before/after commit, isolation, constraints | `solution/first_materials_runtime/api.py`; `solution/first_materials_runtime/acceptance_pg.py` | `tests/first_materials_runtime/test_acceptance_pg.py`; `tests/first_materials_runtime/pg_worker.py` | `evidence/pass_1/original_pg_tests/stdout.log`, `evidence/pass_1/original_pg_tests/stderr.log`; `evidence/pass_2/original_pg_tests/stdout.log`, `evidence/pass_2/original_pg_tests/stderr.log` |
+| Durable replay after actual same-container PostgreSQL restart; no second seed | `solution/first_materials_runtime/api.py`; `solution/first_materials_runtime/acceptance_pg.py` | `PG_GATE.py (unchanged issued file)` | `evidence/pass_1/before_restart/stdout.log`, `evidence/pass_1/before_restart/stderr.log`; `evidence/pass_1/identity_before/stdout.log`, `evidence/pass_1/identity_before/stderr.log`; `evidence/pass_1/docker_restart/stdout.log`, `evidence/pass_1/docker_restart/stderr.log`; `evidence/pass_1/identity_after/stdout.log`, `evidence/pass_1/identity_after/stderr.log`; `evidence/pass_1/after_restart/stdout.log`, `evidence/pass_1/after_restart/stderr.log`; `evidence/pass_2/before_restart/stdout.log`, `evidence/pass_2/before_restart/stderr.log`; `evidence/pass_2/identity_before/stdout.log`, `evidence/pass_2/identity_before/stderr.log`; `evidence/pass_2/docker_restart/stdout.log`, `evidence/pass_2/docker_restart/stderr.log`; `evidence/pass_2/identity_after/stdout.log`, `evidence/pass_2/identity_after/stderr.log`; `evidence/pass_2/after_restart/stdout.log`, `evidence/pass_2/after_restart/stderr.log` |
+| Protected baseline and public ABI/positive scenarios | `solution/first_materials_runtime/api.py`; `solution/first_materials_runtime/acceptance_pg.py` | `ACCEPTANCE_RUNNER.py (unchanged issued file)`; `tests/first_materials_runtime/test_api.py` | `evidence/pass_1/cp0/stdout.log`, `evidence/pass_1/cp0/stderr.log`; `evidence/pass_1/cp1/stdout.log`, `evidence/pass_1/cp1/stderr.log`; `evidence/pass_1/unit_without_dsn/stdout.log`, `evidence/pass_1/unit_without_dsn/stderr.log`; `evidence/pass_2/cp0/stdout.log`, `evidence/pass_2/cp0/stderr.log`; `evidence/pass_2/cp1/stdout.log`, `evidence/pass_2/cp1/stderr.log`; `evidence/pass_2/unit_without_dsn/stdout.log`, `evidence/pass_2/unit_without_dsn/stderr.log` |
+
+## Included candidate regression methods
+
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:151` — `test_connect_operational_error_before_effects`
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:166` — `test_commit_confirmed_close_fails_preserves_ok_and_replay`
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:183` — `test_rollback_confirmed_close_fails_preserves_stale`
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:199` — `test_body_transport_rollback_confirmed_close_fails`
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:222` — `test_unknown_commit_close_error_does_not_repeat_effects`
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:241` — `test_unknown_rollback_close_error_does_not_repeat_effects`
+- `tests/first_materials_runtime/test_pg_cleanup_real.py:259` — `test_entry_error_with_rollback_and_close_errors_is_dependency_unavailable`
+- `tests/first_materials_runtime/test_pg_failures.py:196` — `test_connect_operational_error_before_effects_and_recovery`
+- `tests/first_materials_runtime/test_pg_failures.py:213` — `test_entry_error_with_failing_cleanup_is_dependency_unavailable`
+- `tests/first_materials_runtime/test_pg_failures.py:232` — `test_confirmed_commit_close_error_preserves_ok_and_replay`
+- `tests/first_materials_runtime/test_pg_failures.py:248` — `test_confirmed_rollback_close_error_preserves_original_response`
+- `tests/first_materials_runtime/test_pg_failures.py:289` — `test_unknown_commit_close_error_has_no_automatic_effect_retry`
+- `tests/first_materials_runtime/test_pg_failures.py:312` — `test_unknown_rollback_close_error_has_no_effect_retry`
+- `tests/first_materials_runtime/test_pg_failures.py:328` — `test_failed_nested_enter_keeps_outer_transaction_active`

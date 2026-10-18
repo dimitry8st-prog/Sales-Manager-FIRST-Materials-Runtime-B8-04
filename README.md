@@ -1,50 +1,53 @@
 # FIRST Materials Runtime · B8-04 R3
 
-**Текущий возврат исполнителя — R5. Полная приёмка FIRST-системы не завершена: CP3 и CP4 — NOT_RUN.**
+**Текущий возврат исполнителя — R6. Замечания по ошибкам PostgreSQL исправлены. CP0, CP1 и обязательный CP2 прошли дважды. CP3/CP4 — NOT_RUN.**
 
-Компонент проверяет запрос и права, получает утверждённые материалы, сохраняет результат и предлагает действие через переданные зависимости. Сам не отправляет письма.
+Компонент готовит утверждённые материалы и предлагает действие через доверенные порты. Реальные отправки не выполняются.
 
-## Текущий пакет
+## Пакет возврата
 
-[Скачать B8-04_RETURN_FINAL_R5.zip](return/B8-04_RETURN_FINAL_R5.zip).
-[Итог проверок](return/B8-04_RETURN_FINAL_R5/RESULT.json), [карта требований](return/B8-04_RETURN_FINAL_R5/REQUIREMENT_MAP.md), [логи](return/B8-04_RETURN_FINAL_R5/evidence/COMMANDS_AND_EXIT_CODES.md).
+[B8-04_RETURN_FINAL_R6.zip](return/B8-04_RETURN_FINAL_R6.zip) — один архив для сдачи.
 
-Проверки R5 выполнены дважды, оба раза с кодом выхода 0.
+[RESULT.json](return/B8-04_RETURN_FINAL_R6/RESULT.json) · [Карта требований](return/B8-04_RETURN_FINAL_R6/REQUIREMENT_MAP.md) · [Команды и коды выхода](return/B8-04_RETURN_FINAL_R6/evidence/COMMANDS.json) · [SHA256SUMS](return/B8-04_RETURN_FINAL_R6/SHA256SUMS.txt) · [Проверка архива](return/B8-04_RETURN_FINAL_R6.zip.validation.json).
 
-- Собственные тесты без DSN: 59 обнаружено, 50 выполнено, 9 пропущено.
-- CP0: PASS. CP1: 19/19 PASS.
-- CP2: 9/9 PostgreSQL-тестов, включая оба конкурентных сценария worker/STOP, и PG_GATE до и после перезапуска того же одноразового контейнера без повторного seed.
-- CP3: NOT_RUN, этап интегратора.
-- CP4: NOT_RUN, этап независимого аудитора.
+[Успешный GitHub Actions прогон](https://github.com/dimitry8st-prog/Sales-Manager-FIRST-Materials-Runtime-B8-04/actions/runs/39134783911) проверил точный код коммита `a43b5c39785b2cdd05a505f3875d172a59f2a854` на Python 3.12.15, psycopg 3.3.6 и PostgreSQL 17.11. Опубликованный ниже пакет получен из этого прогона без изменения его байтов.
 
-R3 и R4 остаются в `return/` как история. Их цифры не описывают текущий возврат.
+## Что исправлено в R6
 
-## Воспроизведение из чистого клона
+- `connect_factory()` перенесён внутрь защищённого участка. Ошибка до начала эффектов даёт `DEPENDENCY_UNAVAILABLE` с пустым `data`.
+- Ошибки `rollback()`/`close()` при открытии не перекрывают исходную причину отказа. Очистка учитывает, было ли создано соединение.
+- После подтверждённого commit или rollback ошибка `close()` сохраняет установленный результат. Повреждённое соединение отсоединяется от адаптера.
+- Неподтверждённый commit/rollback даёт `UNKNOWN` со стабильным `request_id`; допускается диагностическое чтение, автоматического повтора эффектов нет.
+- Добавлены регрессии для обеих операций: настоящий `psycopg.OperationalError`, ошибки очистки, восстановление состояния адаптера и сохранение replay.
 
-Python 3.12. Сначала распакуйте `assignment/B8-04_R3.zip` во временную папку. Внутри появится `B8-04_R3` с неизменёнными контрактами, `ACCEPTANCE_RUNNER.py` и `reference_source`.
+Публичный ABI, `api.py`, миграция и существующие тесты R5 сохранены. Все 140 защищённых файлов выданной базы неизменны. R3–R5 остаются в `return/` как история.
 
-Скопируйте каталоги `solution` и `tests` из пакета R5 в эту папку `B8-04_R3`, заменяя одноимённые файлы. Команды запускаются из распакованной `B8-04_R3`.
+## Проверки
 
-Linux/macOS:
+В каждом из двух независимых прогонов:
+
+- CP0 — PASS; CP1 — 19/19 PASS.
+- Без DSN: 73 теста обнаружено, 57 выполнено, 16 пропущено как требующие PostgreSQL.
+- Реальный PostgreSQL: существующие 9 тестов и 7 новых тестов обработки ошибок — PASS без пропусков. Новые тесты выполняют обе операции.
+- Сохранены оба порядка STOP/prepare, аварии worker до/после commit, scope isolation, ограничения SQL и идемпотентный replay.
+- `PG_GATE` до и после настоящего перезапуска того же контейнера/кластера — PASS без повторного seed.
+- Патч применяется к чистой выданной базе и воспроизводит все 9 файлов кандидата побайтно.
+
+Raw stdout/stderr, команды, версии, коды выхода, состояние БД и доказательства перезапуска находятся в `evidence/` внутри ZIP и распакованного возврата.
+
+## Воспроизведение
+
+В чистом клоне нужны Python 3.12+, Git и Docker. Из корня репозитория:
 
 ```bash
-export PYTHONPATH=solution:reference_source
-python -B -m unittest discover -s tests/first_materials_runtime -p 'test_*.py' -v
-python -B ACCEPTANCE_RUNNER.py cp0
-python -B ACCEPTANCE_RUNNER.py cp1 --module first_materials_runtime.api
+python -m pip install "psycopg[binary]==3.3.6"
+python return/tools/verify_r6.py --repo .
 ```
 
-Windows PowerShell:
+Проверка распакует неизменённый `assignment/B8-04_R3.zip`, наложит `solution/` и `tests/`, создаст одноразовые PostgreSQL-контейнеры с синтетическими данными и соберёт новый ZIP с фактическими результатами. Входной `B8_TEST_DSN` не используется. Рабочая БД не затрагивается.
 
-```powershell
-$env:PYTHONPATH = 'solution;reference_source'
-python -B -m unittest discover -s tests/first_materials_runtime -p 'test_*.py' -v
-python -B ACCEPTANCE_RUNNER.py cp0
-python -B ACCEPTANCE_RUNNER.py cp1 --module first_materials_runtime.api
-```
+## Границы результата
 
-`reference_source` — выданная защищённая база для проверок. Для CP2 нужен отдельный одноразовый PostgreSQL и `B8_TEST_DSN`; команды и сырые логи есть в пакете R5. Реальные отправки и production deploy не выполнялись.
+CP2 использует настоящую БД и синтетические внешние порты владельцев F129/F130/materials/F115. Production-адаптеры и shared runtime относятся к CP3 интегратора; независимый аудит установленной системы — к CP4. Готовность всей FIRST-системы и приёмка заказчиком не заявляются.
 
-## Целостность
-
-ZIP использует пути `/`. `SHA256SUMS.txt` проверяет файлы внутри корневой папки `B8-04_RETURN_FINAL_R5`. Хеш архива записан в [validation.txt](return/B8-04_RETURN_FINAL_R5.zip.validation.txt). Секреты, DSN, кэши и окружения в архив не включены.
+SHA-256 архива R6: `f6d9d463ad90dd830602b7b9c55574b9f4983e903668b6e2c17cf22c346e7a0f`.

@@ -1,0 +1,15 @@
+{
+  "label": "versions/git",
+  "command": [
+    "git",
+    "--version"
+  ],
+  "cwd": "/home/runner/work/Sales-Manager-FIRST-Materials-Runtime-B8-04/Sales-Manager-FIRST-Materials-Runtime-B8-04",
+  "started_utc": "2026-10-18T14:10:28.574454+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {},
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:28.576921+00:00",
+  "stdout": "evidence/versions/git/stdout.log",
+  "stderr": "evidence/versions/git/stderr.log"
+}

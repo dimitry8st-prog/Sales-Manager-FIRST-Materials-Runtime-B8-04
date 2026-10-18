@@ -1,0 +1,16 @@
+{
+  "label": "patch/init",
+  "command": [
+    "git",
+    "init",
+    "-q"
+  ],
+  "cwd": "/tmp/b804-r6-nh5b16kj/patch_source/B8-04_R3",
+  "started_utc": "2026-10-18T14:10:28.710708+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {},
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:28.715034+00:00",
+  "stdout": "evidence/patch/init/stdout.log",
+  "stderr": "evidence/patch/init/stderr.log"
+}

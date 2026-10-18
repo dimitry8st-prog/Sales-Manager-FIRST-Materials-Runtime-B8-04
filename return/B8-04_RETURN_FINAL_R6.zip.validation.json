@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "zip": "B8-04_RETURN_FINAL_R6.zip",
+  "sha256": "f6d9d463ad90dd830602b7b9c55574b9f4983e903668b6e2c17cf22c346e7a0f",
+  "bytes": 199209,
+  "manifest_mismatches": [],
+  "independent_full_passes": 2,
+  "CP3": "NOT_RUN",
+  "CP4": "NOT_RUN"
+}

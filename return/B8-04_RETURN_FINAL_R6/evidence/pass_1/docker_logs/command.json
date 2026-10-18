@@ -1,0 +1,16 @@
+{
+  "label": "pass_1/docker_logs",
+  "command": [
+    "docker",
+    "logs",
+    "b804-r6-1-7229135107"
+  ],
+  "cwd": "/tmp/b804-r6-nh5b16kj/pass_1/B8-04_R3",
+  "started_utc": "2026-10-18T14:10:43.482529+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {},
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:43.496895+00:00",
+  "stdout": "evidence/pass_1/docker_logs/stdout.log",
+  "stderr": "evidence/pass_1/docker_logs/stderr.log"
+}

@@ -1,0 +1,23 @@
+{
+  "label": "pass_1/cp1",
+  "command": [
+    "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python",
+    "-B",
+    "ACCEPTANCE_RUNNER.py",
+    "cp1",
+    "--module",
+    "first_materials_runtime.api"
+  ],
+  "cwd": "/tmp/b804-r6-nh5b16kj/pass_1/B8-04_R3",
+  "started_utc": "2026-10-18T14:10:29.832426+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {
+    "PYTHONPATH": "/tmp/b804-r6-nh5b16kj/pass_1/B8-04_R3:/tmp/b804-r6-nh5b16kj/pass_1/B8-04_R3/solution:/tmp/b804-r6-nh5b16kj/pass_1/B8-04_R3/reference_source",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1"
+  },
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:29.900751+00:00",
+  "stdout": "evidence/pass_1/cp1/stdout.log",
+  "stderr": "evidence/pass_1/cp1/stderr.log"
+}

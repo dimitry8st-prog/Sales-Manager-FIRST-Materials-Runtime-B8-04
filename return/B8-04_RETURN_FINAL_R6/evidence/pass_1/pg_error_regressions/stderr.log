@@ -1,0 +1,12 @@
+test_confirmed_commit_close_error_preserves_ok_and_replay (test_pg_failures.PostgresFailureTests.test_confirmed_commit_close_error_preserves_ok_and_replay) ... ok
+test_confirmed_rollback_close_error_preserves_original_response (test_pg_failures.PostgresFailureTests.test_confirmed_rollback_close_error_preserves_original_response) ... ok
+test_connect_operational_error_before_effects_and_recovery (test_pg_failures.PostgresFailureTests.test_connect_operational_error_before_effects_and_recovery) ... ok
+test_entry_error_with_failing_cleanup_is_dependency_unavailable (test_pg_failures.PostgresFailureTests.test_entry_error_with_failing_cleanup_is_dependency_unavailable) ... ok
+test_failed_nested_enter_keeps_outer_transaction_active (test_pg_failures.PostgresFailureTests.test_failed_nested_enter_keeps_outer_transaction_active) ... ok
+test_unknown_commit_close_error_has_no_automatic_effect_retry (test_pg_failures.PostgresFailureTests.test_unknown_commit_close_error_has_no_automatic_effect_retry) ... ok
+test_unknown_rollback_close_error_has_no_effect_retry (test_pg_failures.PostgresFailureTests.test_unknown_rollback_close_error_has_no_effect_retry) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.031s
+
+OK

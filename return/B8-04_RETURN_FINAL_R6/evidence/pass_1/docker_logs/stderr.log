@@ -1,0 +1,38 @@
+********************************************************************************
+WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+         anyone with access to the Postgres port to access your database without
+         a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+         documentation about "trust":
+         https://www.postgresql.org/docs/current/auth-trust.html
+         In Docker's default configuration, this is effectively any other
+         container on the same system.
+
+         It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+         it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+         "docker run".
+********************************************************************************
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-10-18 14:10:38.327 UTC [1] LOG:  starting PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-10-18 14:10:38.327 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-10-18 14:10:38.327 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-10-18 14:10:38.328 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-10-18 14:10:38.330 UTC [71] LOG:  database system was shut down at 2026-10-18 14:10:38 UTC
+2026-10-18 14:10:38.335 UTC [1] LOG:  database system is ready to accept connections
+2026-10-18 14:10:40.782 UTC [214] LOG:  unexpected EOF on client connection with an open transaction
+2026-10-18 14:10:41.099 UTC [246] ERROR:  new row for relation "state" violates check constraint "state_bucket_identifier"
+2026-10-18 14:10:41.099 UTC [246] DETAIL:  Failing row contains ({"campaign_id":"11111111-1111-4111-8111-111111111111","client_id..., , bad, {"value": true}).
+2026-10-18 14:10:41.099 UTC [246] STATEMENT:  INSERT INTO "b8_accept_r6_1_constraints".state(scope_key,bucket,item_key,value) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT(scope_key,bucket,item_key) DO UPDATE SET value=excluded.value
+2026-10-18 14:10:42.775 UTC [1] LOG:  received fast shutdown request
+2026-10-18 14:10:42.776 UTC [1] LOG:  aborting any active transactions
+2026-10-18 14:10:42.778 UTC [1] LOG:  background worker "logical replication launcher" (PID 74) exited with exit code 1
+2026-10-18 14:10:42.779 UTC [69] LOG:  shutting down
+2026-10-18 14:10:42.780 UTC [69] LOG:  checkpoint starting: shutdown immediate
+2026-10-18 14:10:42.804 UTC [69] LOG:  checkpoint complete: wrote 345 buffers (2.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.006 s, sync=0.018 s, total=0.025 s; sync files=277, longest=0.001 s, average=0.001 s; distance=1556 kB, estimate=1556 kB; lsn=0/1A9CA28, redo lsn=0/1A9CA28
+2026-10-18 14:10:42.809 UTC [1] LOG:  database system is shut down
+2026-10-18 14:10:43.112 UTC [1] LOG:  starting PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-10-18 14:10:43.112 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-10-18 14:10:43.112 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-10-18 14:10:43.113 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-10-18 14:10:43.117 UTC [35] LOG:  database system was shut down at 2026-10-18 14:10:42 UTC
+2026-10-18 14:10:43.122 UTC [1] LOG:  database system is ready to accept connections

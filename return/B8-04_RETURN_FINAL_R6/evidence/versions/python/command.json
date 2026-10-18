@@ -1,0 +1,15 @@
+{
+  "label": "versions/python",
+  "command": [
+    "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python",
+    "--version"
+  ],
+  "cwd": "/home/runner/work/Sales-Manager-FIRST-Materials-Runtime-B8-04/Sales-Manager-FIRST-Materials-Runtime-B8-04",
+  "started_utc": "2026-10-18T14:10:28.269604+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {},
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:28.272428+00:00",
+  "stdout": "evidence/versions/python/stdout.log",
+  "stderr": "evidence/versions/python/stderr.log"
+}

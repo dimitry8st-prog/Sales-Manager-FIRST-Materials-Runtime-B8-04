@@ -3,10 +3,10 @@ new file mode 100644
 index 0000000..e69de29
 diff --git a/solution/first_materials_runtime/acceptance_pg.py b/solution/first_materials_runtime/acceptance_pg.py
 new file mode 100644
-index 0000000..35a8106
+index 0000000..28aa3d6
 --- /dev/null
 +++ b/solution/first_materials_runtime/acceptance_pg.py
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,336 @@
 +"""Изолированный PostgreSQL-адаптер для CP2 B8-04.
 +
 +Он хранит только собственное транзакционное состояние wrapper-а. Внешние
@@ -56,6 +56,28 @@ index 0000000..35a8106
 +    )
 +
 +
++def _rollback_quietly(connection):
++    """Cleanup до начала эффектов не должен заменять причину отказа."""
++    if connection is not None:
++        try:
++            connection.rollback()
++        except Exception:
++            pass
++
++
++def _close_quietly(connection):
++    """Освобождение ресурса не меняет уже установленный исход транзакции.
++
++    Здесь нет retry, commit или повторного вызова зависимости. Ошибка close
++    не доказывает потерю уже полученного подтверждения commit/rollback.
++    """
++    if connection is not None:
++        try:
++            connection.close()
++        except Exception:
++            pass
++
++
 +def initialize(connect_factory, schema):
 +    """Создаём только собственную схему и таблицы B8-04."""
 +    from psycopg import sql
@@ -64,15 +86,16 @@ index 0000000..35a8106
 +    template = _MIGRATION.read_text(encoding="utf-8")
 +    statement = sql.SQL(template).format(schema=identifier)
 +
-+    connection = connect_factory()
++    connection = None
 +    try:
++        connection = connect_factory()
 +        connection.execute(statement)
 +        connection.commit()
 +    except BaseException:
-+        connection.rollback()
++        _rollback_quietly(connection)
 +        raise
 +    finally:
-+        connection.close()
++        _close_quietly(connection)
 +
 +
 +def seed(connect_factory, schema, fixture):
@@ -85,8 +108,9 @@ index 0000000..35a8106
 +    scope_key = _scope_key(scope)
 +    state = fixture.get("seed", {})
 +
-+    connection = connect_factory()
++    connection = None
 +    try:
++        connection = connect_factory()
 +        connection.execute(
 +            sql.SQL("DELETE FROM {}.state").format(identifier)
 +        )
@@ -111,10 +135,10 @@ index 0000000..35a8106
 +                )
 +        connection.commit()
 +    except BaseException:
-+        connection.rollback()
++        _rollback_quietly(connection)
 +        raise
 +    finally:
-+        connection.close()
++        _close_quietly(connection)
 +
 +
 +class PostgresTransaction:
@@ -128,13 +152,15 @@ index 0000000..35a8106
 +        self._delegate_writes = None
 +
 +    def __enter__(self):
-+        from psycopg import sql
++        from psycopg import Error, sql
 +
 +        if self.owner._active is not None:
 +            raise RuntimeError("nested B8-04 transactions are forbidden")
 +
-+        self.connection = self.owner.connect_factory()
 +        try:
++            # Соединение может не быть создано вовсе. До успешного входа
++            # в контекст бизнес-порты и их эффекты ещё не вызываются.
++            self.connection = self.owner.connect_factory()
 +            # READ COMMITTED здесь намеренно сочетается с FOR UPDATE.
 +            # Ожидающий запрос после снятия блокировки обязан увидеть replay,
 +            # который только что зафиксировал первый запрос. SERIALIZABLE
@@ -156,34 +182,32 @@ index 0000000..35a8106
 +                ).format(self.owner.identifier),
 +                (self.scope_key,),
 +            ).fetchone()
++
++            delegate = self.owner.delegate
++            if hasattr(delegate, "state"):
++                self._delegate_state = copy.deepcopy(delegate.state)
++            if hasattr(delegate, "writes"):
++                self._delegate_writes = len(delegate.writes)
 +        except BaseException as error:
-+            try:
-+                self.connection.rollback()
-+            finally:
-+                self.connection.close()
-+            self.connection = None
-+            if type(error).__module__.startswith("psycopg"):
++            _rollback_quietly(self.connection)
++            self._release()
++            if isinstance(error, Error):
 +                raise ConnectionError(
 +                    "PostgreSQL transaction could not be opened"
 +                ) from error
 +            raise
 +
-+        delegate = self.owner.delegate
-+        if hasattr(delegate, "state"):
-+            self._delegate_state = copy.deepcopy(delegate.state)
-+        if hasattr(delegate, "writes"):
-+            self._delegate_writes = len(delegate.writes)
 +        self.owner._active = self
 +        return self
 +
 +    def __exit__(self, exc_type, exc, tb):
 +        connection = self.connection
-+        self.owner._active = None
 +        try:
 +            if exc_type is not None:
 +                try:
 +                    connection.rollback()
 +                except Exception as rollback_error:
++                    self._restore_delegate()
 +                    raise TimeoutError(
 +                        "transaction rollback outcome is unknown"
 +                    ) from rollback_error
@@ -199,8 +223,17 @@ index 0000000..35a8106
 +                ) from commit_error
 +            return False
 +        finally:
-+            connection.close()
-+            self.connection = None
++            self._release()
++
++    def _release(self):
++        """Отсоединяем завершённую/повреждённую сессию на любом пути."""
++        connection = self.connection
++        self.connection = None
++        if self.owner._active is self:
++            self.owner._active = None
++        self._delegate_state = None
++        self._delegate_writes = None
++        _close_quietly(connection)
 +
 +    def _restore_delegate(self):
 +        delegate = self.owner.delegate
@@ -260,10 +293,12 @@ index 0000000..35a8106
 +
 +    def _execute(self, statement, parameters):
 +        """DB-сбой в теле откатится и станет публичной ошибкой зависимости."""
++        from psycopg import Error
++
 +        try:
 +            return self.connection.execute(statement, parameters)
 +        except Exception as error:
-+            if type(error).__module__.startswith("psycopg"):
++            if isinstance(error, Error):
 +                raise ConnectionError("PostgreSQL statement failed") from error
 +            raise
 +
@@ -3776,6 +3811,638 @@ index 0000000..2680745
 +                    material_error(material),
 +                    "INVALID_MATERIAL_DESCRIPTOR",
 +                )
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/first_materials_runtime/test_pg_cleanup_real.py b/tests/first_materials_runtime/test_pg_cleanup_real.py
+new file mode 100644
+index 0000000..13c158f
+--- /dev/null
++++ b/tests/first_materials_runtime/test_pg_cleanup_real.py
+@@ -0,0 +1,276 @@
++"""R6: ошибки драйвера на границах настоящих PostgreSQL-транзакций.
++
++SQL исполняется сервером, состояние проверяется независимым соединением.
++Только выбранный метод соединения получает управляемый OperationalError;
++бизнес-ответы и реальные эффекты MaterialsService не подменяются.
++"""
++
++import copy
++import json
++import os
++import unittest
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++
++
++class FaultConnection:
++    """Одноразовый failpoint вокруг реального соединения psycopg."""
++
++    def __init__(self, raw, fault):
++        self.raw = raw
++        self.fault = fault
++        self.commits = 0
++        self.rollbacks = 0
++        self.closes = 0
++
++    def execute(self, *args, **kwargs):
++        if self.fault == "entry_cleanup":
++            import psycopg
++            raise psycopg.OperationalError("injected entry failure")
++        return self.raw.execute(*args, **kwargs)
++
++    def commit(self):
++        self.commits += 1
++        self.raw.commit()
++        if self.fault == "unknown_commit":
++            import psycopg
++            # Сервер уже зафиксировал данные, подтверждение клиент потерял.
++            raise psycopg.OperationalError("injected lost commit response")
++
++    def rollback(self):
++        self.rollbacks += 1
++        if self.fault in ("unknown_rollback", "entry_cleanup"):
++            import psycopg
++            raise psycopg.OperationalError("injected rollback failure")
++        self.raw.rollback()
++
++    def close(self):
++        self.closes += 1
++        self.raw.close()
++        import psycopg
++        raise psycopg.OperationalError("injected close failure")
++
++
++@unittest.skipUnless(os.environ.get("B8_TEST_DSN"), "real PostgreSQL DSN required")
++class PostgresCleanupRegressionTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        import psycopg
++        from ACCEPTANCE_RUNNER import Ports
++        from first_materials_runtime import acceptance_pg
++        from first_materials_runtime.api import create_service
++
++        cls.psycopg = psycopg
++        cls.Ports = Ports
++        cls.pg = acceptance_pg
++        cls.make_service = staticmethod(create_service)
++        cls.fixtures = [
++            f for f in json.loads((ROOT / "acceptance/fixtures.json").read_text())
++            if f["name"] in (
++                "approved_presentation", "initial_qualification_materials_auto_queue"
++            )
++        ]
++
++    def connect(self):
++        return self.psycopg.connect(os.environ["B8_TEST_DSN"])
++
++    def fixture(self, original):
++        fixture = copy.deepcopy(original)
++        materializer = (
++            "f129.materialize" if fixture["operation"] == "prepare"
++            else "f130.materialize_initial"
++        )
++        fixture["effects"] = {
++            materializer: {"staging": {"current-request": {"written": True}}},
++            "materials.save": {"materials": {"current-request": {"saved": True}}},
++            "dispatch.propose": {"proposals": {"current-request": {"prepared": True}}},
++        }
++        return fixture
++
++    def service(self, fixture, fault):
++        from first_materials_runtime.acceptance_pg import PostgresPorts
++
++        base = os.environ.get("B8_TEST_SCHEMA", "b8_accept_r6")
++        suffix = self._testMethodName.removeprefix("test_")[:10]
++        # Разные схемы для каждого теста и operation, без общего состояния.
++        schema = f"{base}_{suffix}_{'i' if fixture['operation']=='prepare_initial' else 'p'}"
++        self.pg.seed(self.connect, schema, fixture)
++        delegate = self.Ports(fixture)
++        connections = []
++        transactions = []
++        first = True
++
++        def factory():
++            nonlocal first
++            if first:
++                first = False
++                if fault == "connect":
++                    raise self.psycopg.OperationalError("injected connect failure")
++                connection = FaultConnection(self.connect(), fault)
++                connections.append(connection)
++                self.addCleanup(connection.raw.close)
++                return connection
++            return self.connect()
++
++        class RecordingPorts(PostgresPorts):
++            def transaction(self, scope):
++                transaction = super().transaction(scope)
++                transactions.append(transaction)
++                return transaction
++
++        backend = RecordingPorts(factory, schema, delegate)
++        return self.make_service(backend), backend, delegate, schema, connections, transactions
++
++    def counts(self, schema, scope):
++        from psycopg import sql
++
++        with self.connect() as connection:
++            rows = connection.execute(
++                sql.SQL("SELECT bucket,count(*) FROM {}.state WHERE scope_key=%s GROUP BY bucket")
++                .format(sql.Identifier(schema)),
++                (self.pg._scope_key(scope),),
++            ).fetchall()
++        buckets = dict(rows)
++        return {key: buckets.get(key, 0) for key in ("staging", "materials", "proposals", "replay")}
++
++    def assert_detached(self, backend, transactions):
++        self.assertIsNone(backend._active)
++        self.assertTrue(transactions)
++        self.assertTrue(all(tx.connection is None for tx in transactions))
++
++    def report(self, fixture, result, counts, delegate):
++        print(json.dumps({
++            "test": self._testMethodName, "operation": fixture["operation"],
++            "result": result, "database_effect_counts": counts,
++            "save_calls": sum(name == "materials.save" for name, _ in delegate.calls),
++            "propose_calls": sum(name == "dispatch.propose" for name, _ in delegate.calls),
++        }, sort_keys=True))
++
++    def test_connect_operational_error_before_effects(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                service, backend, delegate, schema, _, transactions = self.service(fixture, "connect")
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, {"status": "DEPENDENCY_UNAVAILABLE", "data": {}})
++                self.assertEqual(delegate.calls, [])
++                self.assertEqual(delegate.writes, [])
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {0})
++                self.report(fixture, result, counts, delegate)
++                self.assertEqual(service.execute(fixture["operation"], fixture["request"])["status"], "OK")
++
++    def test_commit_confirmed_close_fails_preserves_ok_and_replay(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                service, backend, delegate, schema, connections, transactions = self.service(fixture, "close")
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, fixture["expect"])
++                calls = copy.deepcopy(delegate.calls)
++                replay = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(replay, {"status": "REPLAY", "data": result["data"]})
++                self.assertEqual(delegate.calls, calls)
++                self.assertEqual((connections[0].commits, connections[0].rollbacks, connections[0].closes), (1, 0, 1))
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {1})
++                self.report(fixture, result, counts, delegate)
++
++    def test_rollback_confirmed_close_fails_preserves_stale(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                fixture["effects"]["dispatch.propose"]["catalog"] = {"current": {"version": "v2"}}
++                service, backend, delegate, schema, connections, transactions = self.service(fixture, "close")
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, {"status": "STALE", "data": {}})
++                self.assertEqual(delegate.state, fixture["seed"])
++                self.assertEqual(delegate.writes, [])
++                self.assertEqual((connections[0].commits, connections[0].rollbacks, connections[0].closes), (0, 1, 1))
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {0})
++                self.report(fixture, result, counts, delegate)
++
++    def test_body_transport_rollback_confirmed_close_fails(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                service, backend, delegate, schema, _, transactions = self.service(fixture, "close")
++                original_call = delegate.call
++
++                def fail_after_proposal(name, request):
++                    result = original_call(name, request)
++                    if name == "dispatch.propose":
++                        raise ConnectionError("injected dependency error after staging")
++                    return result
++
++                delegate.call = fail_after_proposal
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, {"status": "DEPENDENCY_UNAVAILABLE", "data": {}})
++                self.assertEqual(delegate.state, fixture["seed"])
++                self.assertEqual(delegate.writes, [])
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {0})
++                self.report(fixture, result, counts, delegate)
++
++    def test_unknown_commit_close_error_does_not_repeat_effects(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                service, backend, delegate, schema, _, transactions = self.service(fixture, "unknown_commit")
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, {"status": "UNKNOWN", "data": {"request_id": fixture["request"]["request_id"]}})
++                calls = copy.deepcopy(delegate.calls)
++                self.assertEqual(sum(name == "materials.save" for name, _ in calls), 1)
++                self.assertEqual(sum(name == "dispatch.propose" for name, _ in calls), 1)
++                self.assertGreaterEqual(len(transactions), 2)  # diagnostic scoped reread
++                replay = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(replay["status"], "REPLAY")
++                self.assertEqual(delegate.calls, calls)
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {1})
++                self.report(fixture, result, counts, delegate)
++
++    def test_unknown_rollback_close_error_does_not_repeat_effects(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                fixture["effects"]["dispatch.propose"]["catalog"] = {"current": {"version": "v2"}}
++                service, backend, delegate, schema, _, transactions = self.service(fixture, "unknown_rollback")
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, {"status": "UNKNOWN", "data": {"request_id": fixture["request"]["request_id"]}})
++                self.assertEqual(sum(name == "materials.save" for name, _ in delegate.calls), 1)
++                self.assertEqual(sum(name == "dispatch.propose" for name, _ in delegate.calls), 1)
++                self.assertEqual(delegate.state, fixture["seed"])
++                self.assertEqual(delegate.writes, [])
++                self.assertGreaterEqual(len(transactions), 2)
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {0})
++                self.report(fixture, result, counts, delegate)
++
++    def test_entry_error_with_rollback_and_close_errors_is_dependency_unavailable(self):
++        for original in self.fixtures:
++            with self.subTest(operation=original["operation"]):
++                fixture = self.fixture(original)
++                service, backend, delegate, schema, connections, transactions = self.service(fixture, "entry_cleanup")
++                result = service.execute(fixture["operation"], fixture["request"])
++                self.assertEqual(result, {"status": "DEPENDENCY_UNAVAILABLE", "data": {}})
++                self.assertEqual(delegate.calls, [])
++                self.assertEqual(delegate.writes, [])
++                self.assertEqual((connections[0].commits, connections[0].rollbacks, connections[0].closes), (0, 1, 1))
++                self.assert_detached(backend, transactions)
++                counts = self.counts(schema, fixture["fixture_scope"])
++                self.assertEqual(set(counts.values()), {0})
++                self.report(fixture, result, counts, delegate)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/first_materials_runtime/test_pg_failures.py b/tests/first_materials_runtime/test_pg_failures.py
+new file mode 100644
+index 0000000..ad06e38
+--- /dev/null
++++ b/tests/first_materials_runtime/test_pg_failures.py
+@@ -0,0 +1,344 @@
++"""Regression unit tests of PG failures; this SQL double is NOT a CP2 run.
++
++The actual MaterialsService, PostgresPorts and PostgresTransaction execute
++against issued Ports/fixtures. Only the SQL connection is replaced: it models
++committed rows and per-connection pending rows, and injects genuine psycopg
++exceptions. It does not model PostgreSQL locking, crashes or server restarts;
++the separate real-PostgreSQL tests remain required for those properties.
++"""
++
++import copy
++import json
++import sys
++import unittest
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT))
++sys.path.insert(0, str(ROOT / "solution"))
++
++try:
++    import psycopg
++except ImportError:
++    psycopg = None
++
++from ACCEPTANCE_RUNNER import Ports
++from first_materials_runtime import acceptance_pg as pg
++from first_materials_runtime.api import create_service
++
++
++class CursorDouble:
++    def __init__(self, rows=()):
++        self.rows = list(rows)
++
++    def fetchone(self):
++        return self.rows[0] if self.rows else None
++
++    def fetchall(self):
++        return self.rows
++
++
++class SQLDouble:
++    """Single-threaded SQL boundary double; never represents a real PG test."""
++
++    def __init__(self, fixture):
++        scope = pg._scope_key(fixture["fixture_scope"])
++        self.rows = {
++            (scope, bucket, key): copy.deepcopy(value)
++            for bucket, rows in fixture["seed"].items()
++            for key, value in rows.items()
++        }
++        self.plans = []
++        self.connections = []
++        self.attempts = 0
++
++    def connect(self):
++        self.attempts += 1
++        plan = self.plans.pop(0) if self.plans else {}
++        if isinstance(plan, BaseException):
++            raise plan
++        connection = ConnectionDouble(self, plan)
++        self.connections.append(connection)
++        return connection
++
++
++class ConnectionDouble:
++    """commit_error=after persists rows before losing the acknowledgement."""
++
++    def __init__(self, database, faults):
++        self.database = database
++        self.faults = faults
++        self.pending = copy.deepcopy(database.rows)
++        self.sql_calls = []
++        self.commit_calls = 0
++        self.rollback_calls = 0
++        self.close_calls = 0
++        self.closed = False
++
++    def execute(self, statement, parameters=()):
++        text = (
++            statement if isinstance(statement, str)
++            else statement.as_string()
++        )
++        self.sql_calls.append((text, copy.deepcopy(parameters)))
++        if text.startswith("SET TRANSACTION"):
++            if self.faults.get("entry_error"):
++                raise psycopg.OperationalError("injected opening failure")
++            return CursorDouble()
++        if ".scope_locks" in text:
++            return CursorDouble([(parameters[0],)])
++        if text.startswith("SELECT value FROM"):
++            value = self.pending.get(tuple(parameters))
++            return CursorDouble(
++                [] if value is None else [(copy.deepcopy(value),)]
++            )
++        if text.startswith("INSERT INTO") and ".state" in text:
++            self.pending[tuple(parameters[:3])] = json.loads(parameters[3])
++            return CursorDouble()
++        if text.startswith("DELETE FROM") and ".state" in text:
++            self.pending.pop(tuple(parameters), None)
++            return CursorDouble()
++        if text.startswith("SELECT item_key,value FROM"):
++            scope, bucket = parameters
++            return CursorDouble(sorted(
++                (key, copy.deepcopy(value))
++                for (row_scope, row_bucket, key), value in self.pending.items()
++                if (row_scope, row_bucket) == (scope, bucket)
++            ))
++        raise AssertionError("Unexpected SQL in boundary double: " + text)
++
++    def commit(self):
++        self.commit_calls += 1
++        fault = self.faults.get("commit_error")
++        if fault != "before":
++            self.database.rows = copy.deepcopy(self.pending)
++        if fault:
++            raise psycopg.OperationalError("injected commit acknowledgement loss")
++
++    def rollback(self):
++        self.rollback_calls += 1
++        self.pending = copy.deepcopy(self.database.rows)
++        if self.faults.get("rollback_error"):
++            raise psycopg.OperationalError("injected rollback acknowledgement loss")
++
++    def close(self):
++        self.close_calls += 1
++        self.closed = True
++        if self.faults.get("close_error"):
++            raise psycopg.OperationalError("injected close failure")
++
++
++class RecordingPorts(pg.PostgresPorts):
++    def __init__(self, *args):
++        super().__init__(*args)
++        self.transactions = []
++
++    def transaction(self, scope):
++        transaction = super().transaction(scope)
++        self.transactions.append(transaction)
++        return transaction
++
++
++@unittest.skipIf(psycopg is None, "psycopg is required for PG failure regression")
++class PostgresFailureTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        issued = json.loads(
++            (ROOT / "acceptance" / "fixtures.json").read_text(encoding="utf-8")
++        )
++        cls.fixtures = [
++            fixture for fixture in issued if fixture["name"] in {
++                "approved_presentation", "initial_qualification_materials_auto_queue"
++            }
++        ]
++        assert {item["operation"] for item in cls.fixtures} == {
++            "prepare", "prepare_initial"
++        }
++
++    def setup_case(self, fixture):
++        fixture = copy.deepcopy(fixture)
++        materialize = (
++            "f129.materialize" if fixture["operation"] == "prepare"
++            else "f130.materialize_initial"
++        )
++        fixture["effects"] = {
++            materialize: {"staging": {"draft": {"prepared": True}}},
++            "materials.save": {"materials": {"draft": {"saved": True}}},
++            "dispatch.propose": {"proposals": {"draft": {"proposed": True}}},
++        }
++        delegate = Ports(fixture)
++        database = SQLDouble(fixture)
++        adapter = RecordingPorts(database.connect, "b8_accept_failure_unit", delegate)
++        service = create_service(adapter)  # No initialize(): execute boundary only.
++        return fixture, delegate, database, adapter, service, materialize
++
++    def run_request(self, fixture, service):
++        return service.execute(fixture["operation"], fixture["request"])
++
++    def assert_clean(self, adapter, database):
++        self.assertIsNone(adapter._active)
++        self.assertTrue(all(tx.connection is None for tx in adapter.transactions))
++        self.assertTrue(all(connection.closed for connection in database.connections))
++
++    def assert_effect_chain(self, delegate, count):
++        names = [name for name, _ in delegate.calls]
++        self.assertEqual(names.count("materials.save"), count)
++        self.assertEqual(names.count("dispatch.propose"), count)
++        self.assertNotIn("provider.send", names)
++
++    def assert_no_effect_rows(self, database):
++        self.assertFalse(any(
++            bucket in {"staging", "materials", "proposals", "replay"}
++            for _, bucket, _ in database.rows
++        ))
++
++    def test_connect_operational_error_before_effects_and_recovery(self):
++        for fixture in self.fixtures:
++            with self.subTest(operation=fixture["operation"]):
++                fixture, delegate, database, adapter, service, _ = self.setup_case(fixture)
++                database.plans.append(psycopg.OperationalError("connect failed"))
++                self.assertEqual(self.run_request(fixture, service), {
++                    "status": "DEPENDENCY_UNAVAILABLE", "data": {},
++                })
++                self.assertEqual(delegate.calls, [])
++                self.assertEqual(delegate.writes, [])
++                self.assertEqual(database.connections, [])
++                self.assert_no_effect_rows(database)
++                self.assert_clean(adapter, database)
++                self.assertEqual(self.run_request(fixture, service), fixture["expect"])
++                self.assert_effect_chain(delegate, 1)
++                self.assert_clean(adapter, database)
++
++    def test_entry_error_with_failing_cleanup_is_dependency_unavailable(self):
++        for fixture in self.fixtures:
++            for rollback_error in (False, True):
++                with self.subTest(operation=fixture["operation"], rollback=rollback_error):
++                    fixture, delegate, database, adapter, service, _ = self.setup_case(fixture)
++                    database.plans.append({
++                        "entry_error": True, "rollback_error": rollback_error,
++                        "close_error": True,
++                    })
++                    self.assertEqual(self.run_request(fixture, service), {
++                        "status": "DEPENDENCY_UNAVAILABLE", "data": {},
++                    })
++                    self.assertEqual(delegate.calls, [])
++                    self.assert_no_effect_rows(database)
++                    self.assertEqual(database.connections[0].commit_calls, 0)
++                    self.assertEqual(database.connections[0].close_calls, 1)
++                    self.assert_clean(adapter, database)
++                    self.assertEqual(self.run_request(fixture, service), fixture["expect"])
++
++    def test_confirmed_commit_close_error_preserves_ok_and_replay(self):
++        for fixture in self.fixtures:
++            with self.subTest(operation=fixture["operation"]):
++                fixture, delegate, database, adapter, service, _ = self.setup_case(fixture)
++                database.plans.append({"close_error": True})
++                self.assertEqual(self.run_request(fixture, service), fixture["expect"])
++                committed = copy.deepcopy(database.rows)
++                first = database.connections[0]
++                self.assertEqual((first.commit_calls, first.rollback_calls), (1, 0))
++                self.assert_clean(adapter, database)
++                database.plans.append({"close_error": True})
++                self.assertEqual(self.run_request(fixture, service), fixture["repeat_expect"])
++                self.assertEqual(database.rows, committed)
++                self.assert_effect_chain(delegate, 1)
++                self.assert_clean(adapter, database)
++
++    def test_confirmed_rollback_close_error_preserves_original_response(self):
++        for fixture in self.fixtures:
++            for refusal in ("INVALID", "STALE", "BLOCKED", "TRANSPORT"):
++                with self.subTest(operation=fixture["operation"], refusal=refusal):
++                    fixture, delegate, database, adapter, service, materialize = self.setup_case(fixture)
++                    database.plans.append({"close_error": True})
++                    before = copy.deepcopy(database.rows)
++                    state_before = copy.deepcopy(delegate.state)
++                    if refusal == "INVALID":
++                        delegate.responses[materialize]["sha256"] = "invalid"
++                        expected = {"status": "INVALID", "data": {"code": "INVALID_HASH"}}
++                    elif refusal in ("STALE", "BLOCKED"):
++                        bucket, patch = (
++                            ("catalog", {"version": "v2", "revision": 2})
++                            if refusal == "STALE" else
++                            ("authority", {"status": "STOPPED", "revision": 2})
++                        )
++                        delegate.effects["dispatch.propose"][bucket] = {"current": patch}
++                        expected = {"status": refusal, "data": {}}
++                    else:
++                        original_call = delegate.call
++                        original_error = ConnectionError("materialization disconnected")
++
++                        def failing_call(name, request):
++                            value = original_call(name, request)
++                            if name == materialize:
++                                raise original_error
++                            return value
++
++                        delegate.call = failing_call
++                        expected = {"status": "DEPENDENCY_UNAVAILABLE", "data": {}}
++                    self.assertEqual(self.run_request(fixture, service), expected)
++                    self.assertEqual(database.rows, before)
++                    self.assertEqual(delegate.state, state_before)
++                    self.assertEqual(delegate.writes, [])
++                    first = database.connections[0]
++                    self.assertEqual((first.commit_calls, first.rollback_calls), (0, 1))
++                    # No diagnostic retry is needed after a confirmed rollback.
++                    self.assertEqual(database.attempts, 1)
++                    self.assert_clean(adapter, database)
++
++    def test_unknown_commit_close_error_has_no_automatic_effect_retry(self):
++        for fixture in self.fixtures:
++            for commit_error in ("before", "after"):
++                with self.subTest(operation=fixture["operation"], commit=commit_error):
++                    fixture, delegate, database, adapter, service, _ = self.setup_case(fixture)
++                    database.plans.append({"commit_error": commit_error, "close_error": True})
++                    self.assertEqual(self.run_request(fixture, service), {
++                        "status": "UNKNOWN",
++                        "data": {"request_id": fixture["request"]["request_id"]},
++                    })
++                    self.assert_effect_chain(delegate, 1)
++                    self.assertEqual(database.attempts, 2)  # Read-only diagnostic transaction.
++                    self.assertFalse(any(
++                        text.startswith("INSERT INTO") and ".state" in text
++                        for text, _ in database.connections[1].sql_calls
++                    ))
++                    self.assert_clean(adapter, database)
++                    if commit_error == "after":
++                        self.assertEqual(self.run_request(fixture, service), fixture["repeat_expect"])
++                        self.assert_effect_chain(delegate, 1)
++                    else:
++                        self.assert_no_effect_rows(database)
++
++    def test_unknown_rollback_close_error_has_no_effect_retry(self):
++        for fixture in self.fixtures:
++            with self.subTest(operation=fixture["operation"]):
++                fixture, delegate, database, adapter, service, materialize = self.setup_case(fixture)
++                delegate.responses[materialize]["sha256"] = "invalid"
++                database.plans.append({"rollback_error": True, "close_error": True})
++                self.assertEqual(self.run_request(fixture, service), {
++                    "status": "UNKNOWN",
++                    "data": {"request_id": fixture["request"]["request_id"]},
++                })
++                self.assertEqual([name for name, _ in delegate.calls].count(materialize), 1)
++                self.assert_effect_chain(delegate, 0)
++                self.assert_no_effect_rows(database)
++                self.assertEqual(database.attempts, 2)
++                self.assert_clean(adapter, database)
++
++    def test_failed_nested_enter_keeps_outer_transaction_active(self):
++        for fixture in self.fixtures:
++            with self.subTest(operation=fixture["operation"]):
++                fixture, _, database, adapter, _, _ = self.setup_case(fixture)
++                with adapter.transaction(fixture["fixture_scope"]) as outer:
++                    nested = adapter.transaction(fixture["fixture_scope"])
++                    with self.assertRaisesRegex(RuntimeError, "nested"):
++                        nested.__enter__()
++                    self.assertIs(adapter._active, outer)
++                    self.assertIsNone(nested.connection)
++                    self.assertIsNotNone(outer.get("authority", "current"))
++                    self.assertEqual(database.attempts, 1)
++                self.assert_clean(adapter, database)
++
 +
 +if __name__ == "__main__":
 +    unittest.main()

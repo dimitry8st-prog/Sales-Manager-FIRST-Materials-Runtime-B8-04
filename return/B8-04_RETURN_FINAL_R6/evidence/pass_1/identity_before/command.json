@@ -1,0 +1,24 @@
+{
+  "label": "pass_1/identity_before",
+  "command": [
+    "docker",
+    "exec",
+    "b804-r6-1-7229135107",
+    "psql",
+    "-U",
+    "b8",
+    "-d",
+    "b8",
+    "-At",
+    "-c",
+    "SELECT json_build_object('system_identifier',system_identifier::text,'postmaster_started',pg_postmaster_start_time()::text,'version',version()) FROM pg_control_system()"
+  ],
+  "cwd": "/tmp/b804-r6-nh5b16kj/pass_1/B8-04_R3",
+  "started_utc": "2026-10-18T14:10:42.677928+00:00",
+  "timeout_seconds": 300,
+  "environment_overrides": {},
+  "exit_code": 0,
+  "finished_utc": "2026-10-18T14:10:42.756889+00:00",
+  "stdout": "evidence/pass_1/identity_before/stdout.log",
+  "stderr": "evidence/pass_1/identity_before/stderr.log"
+}
