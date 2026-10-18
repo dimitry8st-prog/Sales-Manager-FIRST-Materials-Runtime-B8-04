@@ -310,10 +310,10 @@ index 0000000000000000000000000000000000000000..35a8106627bc645032f885cba43efa55
 +    )
 diff --git a/solution/first_materials_runtime/api.py b/solution/first_materials_runtime/api.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a4650b3660e160268d54c7187b503214f59493f
+index 0000000000000000000000000000000000000000..5782f6a1e726aeced4233d36a536caad84c19608
 --- /dev/null
 +++ b/solution/first_materials_runtime/api.py
-@@ -0,0 +1,744 @@
+@@ -0,0 +1,767 @@
 +"""Подготовка утверждённых материалов: компонент B8-04."""
 +
 +import hashlib
@@ -993,10 +993,26 @@ index 0000000000000000000000000000000000000000..8a4650b3660e160268d54c7187b50321
 +        ) in ("STOPPED", "HUMAN", "HANDED_OFF"):
 +            raise TransactionResponse("BLOCKED", {})
 +
++        if type(current_authority) is not dict:
++            raise TransactionResponse("STALE", {})
++
++        if type(current_catalog) is not dict:
++            raise TransactionResponse("STALE", {})
++
++        # Сравниваем только контрактные поля состояния. STOP/HUMAN выше
++        # проверяются первыми, поэтому безопасность важнее одновременной
++        # смены конфигурации.
 +        if (
-+            current_authority != authority
-+            or current_catalog != catalog
-+            or type(current_catalog) is not dict
++            current_authority.get("status")
++            != authority.get("status")
++            or current_authority.get("revision")
++            != authority.get("revision")
++            or current_authority.get("catalog_version")
++            != authority.get("catalog_version")
++            or current_catalog.get("version")
++            != catalog.get("version")
++            or current_catalog.get("revision")
++            != catalog.get("revision")
 +            or current_catalog.get("version")
 +            != request["catalog_version"]
 +        ):
@@ -1033,6 +1049,13 @@ index 0000000000000000000000000000000000000000..8a4650b3660e160268d54c7187b50321
 +        code = dispatch_response_error(proposed)
 +        if code is not None:
 +            raise InvalidPortResponse(code)
++
++        # Dispatch owner тоже может изменить authority/config внутри общей
++        # транзакции. До replay и commit проверяем состояние ещё раз; отказ
++        # выходит исключением и откатывает staging/save/proposal вместе.
++        self._ensure_state_unchanged(
++            tx, authority, catalog, request
++        )
 +
 +        # В повтор кладём описание и исходные идентификаторы, не текст письма.
 +        tx.put("replay", replay_key(request), {
@@ -1088,17 +1111,235 @@ index 0000000000000000000000000000000000000000..ad52a1b33f5dff3ae91be44ce769d3b4
 +    CONSTRAINT state_item_key_nonempty
 +        CHECK (char_length(item_key) BETWEEN 1 AND 4096)
 +);
+diff --git a/tests/first_materials_runtime/pg_worker.py b/tests/first_materials_runtime/pg_worker.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ccef6aa8b053f0068c2c3f0dca965a7f115b681b
+--- /dev/null
++++ b/tests/first_materials_runtime/pg_worker.py
+@@ -0,0 +1,210 @@
++"""Отдельный процесс для обязательных crash/concurrency сценариев CP2."""
++
++from __future__ import annotations
++
++import copy
++import json
++import os
++import sys
++import time
++from pathlib import Path
++
++import psycopg
++from psycopg import sql
++
++
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT))
++sys.path.insert(0, str(ROOT / "solution"))
++
++from ACCEPTANCE_RUNNER import Ports  # noqa: E402
++from first_materials_runtime import acceptance_pg  # noqa: E402
++from first_materials_runtime.api import (  # noqa: E402
++    create_service as create_materials_service,
++)
++
++
++DSN = os.environ["B8_TEST_DSN"]
++SCHEMA = os.environ["B8_WORKER_SCHEMA"]
++MODE = os.environ["B8_WORKER_MODE"]
++APPLICATION_NAME = os.environ["B8_WORKER_APPLICATION"]
++
++
++def connect():
++    return psycopg.connect(DSN, application_name=APPLICATION_NAME)
++
++
++def control_connect():
++    return psycopg.connect(
++        DSN, application_name=f"{APPLICATION_NAME}-control"
++    )
++
++
++def mark(event, detail=None):
++    with control_connect() as connection:
++        connection.execute(
++            sql.SQL(
++                "INSERT INTO {}.control_events(event,detail) "
++                "VALUES (%s,%s::jsonb) "
++                "ON CONFLICT(event) DO UPDATE SET detail=excluded.detail"
++            ).format(sql.Identifier(SCHEMA)),
++            (event, json.dumps(detail or {}, sort_keys=True)),
++        )
++
++
++def event_exists(event):
++    with control_connect() as connection:
++        return connection.execute(
++            sql.SQL(
++                "SELECT 1 FROM {}.control_events WHERE event=%s"
++            ).format(sql.Identifier(SCHEMA)),
++            (event,),
++        ).fetchone() is not None
++
++
++def wait_for(event, timeout=20):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if event_exists(event):
++            return
++        time.sleep(0.05)
++    raise TimeoutError(f"worker barrier timeout: {event}")
++
++
++def fixture():
++    fixtures = json.loads(
++        (ROOT / "acceptance" / "fixtures.json").read_text(
++            encoding="utf-8"
++        )
++    )
++    value = copy.deepcopy(next(
++        item for item in fixtures
++        if item["name"] == "approved_presentation"
++    ))
++    value["effects"] = {
++        "f129.materialize": {
++            "staging": {"current-request": {"written": True}},
++        },
++        "materials.save": {
++            "materials": {"current-request": {"saved": True}},
++        },
++        "dispatch.propose": {
++            "proposals": {"current-request": {"prepared": True}},
++        },
++    }
++    return value
++
++
++class DispatchBarrierPorts(acceptance_pg.PostgresPorts):
++    def __init__(self, *args, event, release, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.event = event
++        self.release = release
++
++    def call(self, name, request):
++        result = super().call(name, request)
++        if name == "dispatch.propose":
++            # super() уже перенёс staging/save/proposal в SQL-транзакцию.
++            mark(self.event, {"pid": os.getpid(), "effects_mirrored": True})
++            wait_for(self.release)
++        return result
++
++
++class CommitBarrierTransaction:
++    def __init__(self, inner):
++        self.inner = inner
++
++    def __enter__(self):
++        return self.inner.__enter__()
++
++    def __exit__(self, exc_type, exc, tb):
++        result = self.inner.__exit__(exc_type, exc, tb)
++        if exc_type is None:
++            # inner.__exit__ вернулся только после успешного PostgreSQL commit.
++            mark("commit_complete", {
++                "pid": os.getpid(),
++                "postgres_commit_returned": True,
++            })
++            wait_for("release_after_commit")
++        return result
++
++
++class CommitBarrierPorts(acceptance_pg.PostgresPorts):
++    def transaction(self, scope):
++        return CommitBarrierTransaction(super().transaction(scope))
++
++
++def run_prepare_before_commit_crash():
++    value = fixture()
++    backend = DispatchBarrierPorts(
++        connect,
++        SCHEMA,
++        Ports(value),
++        event="before_commit_ready",
++        release="release_before_commit",
++    )
++    result = create_materials_service(backend).execute(
++        value["operation"], value["request"]
++    )
++    print(json.dumps(result, sort_keys=True), flush=True)
++
++
++def run_prepare_after_commit_crash():
++    value = fixture()
++    backend = CommitBarrierPorts(connect, SCHEMA, Ports(value))
++    result = create_materials_service(backend).execute(
++        value["operation"], value["request"]
++    )
++    print(json.dumps(result, sort_keys=True), flush=True)
++
++
++def run_prepare_ordering_barrier():
++    value = fixture()
++    backend = DispatchBarrierPorts(
++        connect,
++        SCHEMA,
++        Ports(value),
++        event="prepare_after_dispatch",
++        release="release_prepare",
++    )
++    result = create_materials_service(backend).execute(
++        value["operation"], value["request"]
++    )
++    print(json.dumps(result, sort_keys=True), flush=True)
++
++
++def run_state_update():
++    value = fixture()
++    update = os.environ["B8_WORKER_UPDATE"]
++    mark("update_attempt", {"pid": os.getpid(), "update": update})
++    backend = acceptance_pg.PostgresPorts(
++        connect, SCHEMA, Ports(value)
++    )
++    with backend.transaction(value["fixture_scope"]) as transaction:
++        if update == "catalog":
++            transaction.put("catalog", "current", {
++                "version": "v2",
++                "revision": 2,
++            })
++        elif update in ("STOPPED", "HUMAN"):
++            transaction.put("authority", "current", {
++                "status": update,
++                "revision": 2,
++                "catalog_version": "v1",
++            })
++        else:
++            raise ValueError(f"unknown update: {update}")
++    mark("update_committed", {"pid": os.getpid(), "update": update})
++    print(json.dumps({"updated": update}, sort_keys=True), flush=True)
++
++
++if MODE == "crash_before_commit":
++    run_prepare_before_commit_crash()
++elif MODE == "crash_after_commit":
++    run_prepare_after_commit_crash()
++elif MODE == "prepare_ordering":
++    run_prepare_ordering_barrier()
++elif MODE == "update_state":
++    run_state_update()
++else:
++    raise ValueError(f"unknown worker mode: {MODE}")
 diff --git a/tests/first_materials_runtime/test_acceptance_pg.py b/tests/first_materials_runtime/test_acceptance_pg.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..622de1554922d9497eb172a1a60bf00e67fa2cae
+index 0000000000000000000000000000000000000000..8c039eeaae8cf75d5b0ada0b4abc5256db9a801a
 --- /dev/null
 +++ b/tests/first_materials_runtime/test_acceptance_pg.py
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,603 @@
 +"""Дополнительные CP2-проверки на настоящем PostgreSQL."""
 +
 +import copy
 +import json
 +import os
++import subprocess
++import sys
 +import threading
 +import time
 +import unittest
@@ -1156,6 +1397,129 @@ index 0000000000000000000000000000000000000000..622de1554922d9497eb172a1a60bf00e
 +            params.append(bucket)
 +        with self.connect() as connection:
 +            return connection.execute(query, params).fetchone()[0]
++
++    def state_value(self, schema, scope, bucket, key):
++        from psycopg import sql
++
++        with self.connect() as connection:
++            row = connection.execute(
++                sql.SQL(
++                    "SELECT value FROM {}.state "
++                    "WHERE scope_key=%s AND bucket=%s AND item_key=%s"
++                ).format(sql.Identifier(schema)),
++                (self.pg._scope_key(scope), bucket, key),
++            ).fetchone()
++        return None if row is None else row[0]
++
++    def setup_control(self, schema, fixture):
++        from psycopg import sql
++
++        self.pg.seed(self.connect, schema, fixture)
++        with self.connect() as connection:
++            connection.execute(
++                sql.SQL(
++                    "CREATE TABLE IF NOT EXISTS {}.control_events("
++                    "event text PRIMARY KEY, detail jsonb NOT NULL)"
++                ).format(sql.Identifier(schema))
++            )
++            connection.execute(
++                sql.SQL("TRUNCATE {}.control_events").format(
++                    sql.Identifier(schema)
++                )
++            )
++
++    def control_event(self, schema, event):
++        from psycopg import sql
++
++        with self.connect() as connection:
++            row = connection.execute(
++                sql.SQL(
++                    "SELECT detail FROM {}.control_events WHERE event=%s"
++                ).format(sql.Identifier(schema)),
++                (event,),
++            ).fetchone()
++        return None if row is None else row[0]
++
++    def mark_control(self, schema, event, detail=None):
++        from psycopg import sql
++
++        with self.connect() as connection:
++            connection.execute(
++                sql.SQL(
++                    "INSERT INTO {}.control_events(event,detail) "
++                    "VALUES (%s,%s::jsonb) "
++                    "ON CONFLICT(event) DO UPDATE SET detail=excluded.detail"
++                ).format(sql.Identifier(schema)),
++                (event, json.dumps(detail or {}, sort_keys=True)),
++            )
++
++    def wait_control(self, schema, event, timeout=15):
++        deadline = time.monotonic() + timeout
++        while time.monotonic() < deadline:
++            detail = self.control_event(schema, event)
++            if detail is not None:
++                return detail
++            time.sleep(0.05)
++        self.fail(f"database barrier timeout: {event}")
++
++    def start_worker(self, schema, mode, application, update=None):
++        environment = os.environ.copy()
++        environment.update({
++            "B8_TEST_DSN": self.dsn,
++            "B8_WORKER_SCHEMA": schema,
++            "B8_WORKER_MODE": mode,
++            "B8_WORKER_APPLICATION": application,
++            "PYTHONPATH": os.pathsep.join((
++                str(ROOT / "solution"), str(ROOT),
++            )),
++        })
++        if update is not None:
++            environment["B8_WORKER_UPDATE"] = update
++        return subprocess.Popen(
++            [
++                sys.executable,
++                "-B",
++                str(
++                    ROOT / "tests" / "first_materials_runtime"
++                    / "pg_worker.py"
++                ),
++            ],
++            cwd=ROOT,
++            env=environment,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++            encoding="utf-8",
++        )
++
++    def finish_worker(self, process, timeout=15):
++        stdout, stderr = process.communicate(timeout=timeout)
++        if stdout:
++            print("worker stdout:", stdout.strip())
++        if stderr:
++            print("worker stderr:", stderr.strip())
++        self.assertEqual(process.returncode, 0)
++        return stdout
++
++    def kill_worker(self, process):
++        process.kill()
++        stdout, stderr = process.communicate(timeout=10)
++        self.assertNotEqual(process.returncode, 0)
++        return {
++            "returncode": process.returncode,
++            "stdout": stdout.strip(),
++            "stderr": stderr.strip(),
++        }
++
++    def worker_activity(self, application):
++        with self.connect() as connection:
++            row = connection.execute(
++                "SELECT state,wait_event_type,wait_event,"
++                "xact_start IS NOT NULL "
++                "FROM pg_stat_activity WHERE application_name=%s",
++                (application,),
++            ).fetchone()
++        return row
 +
 +    def test_dependency_staging_rolls_back_with_invalid_material(self):
 +        fixture = copy.deepcopy(self.fixture)
@@ -1338,15 +1702,246 @@ index 0000000000000000000000000000000000000000..622de1554922d9497eb172a1a60bf00e
 +            0,
 +        )
 +
++    def test_process_crash_before_commit_rolls_back_all_effects(self):
++        fixture = copy.deepcopy(self.fixture)
++        schema = self.schema("crash_before")
++        self.setup_control(schema, fixture)
++        application = "b804-crash-before"
++        process = self.start_worker(
++            schema, "crash_before_commit", application
++        )
++        try:
++            marker = self.wait_control(schema, "before_commit_ready")
++            activity = self.worker_activity(application)
++            self.assertIsNotNone(activity)
++            self.assertTrue(activity[3])
++            invisible = {
++                bucket: self.state_count(
++                    schema, fixture["fixture_scope"], bucket
++                )
++                for bucket in (
++                    "staging", "materials", "proposals", "replay"
++                )
++            }
++            self.assertEqual(invisible, {
++                "staging": 0,
++                "materials": 0,
++                "proposals": 0,
++                "replay": 0,
++            })
++            killed = self.kill_worker(process)
++        finally:
++            if process.poll() is None:
++                process.kill()
++                process.communicate(timeout=10)
++
++        committed = {
++            bucket: self.state_count(
++                schema, fixture["fixture_scope"], bucket
++            )
++            for bucket in (
++                "staging", "materials", "proposals", "replay"
++            )
++        }
++        self.assertEqual(committed, {
++            "staging": 0,
++            "materials": 0,
++            "proposals": 0,
++            "replay": 0,
++        })
++        print("crash_before_commit", json.dumps({
++            "marker": marker,
++            "activity": activity,
++            "visible_while_open": invisible,
++            "worker": killed,
++            "committed_after_kill": committed,
++        }, ensure_ascii=False, default=str, sort_keys=True))
++
++    def test_process_crash_after_real_commit_replays_without_effects(self):
++        fixture = copy.deepcopy(self.fixture)
++        schema = self.schema("crash_after")
++        self.setup_control(schema, fixture)
++        application = "b804-crash-after"
++        process = self.start_worker(
++            schema, "crash_after_commit", application
++        )
++        try:
++            marker = self.wait_control(schema, "commit_complete")
++            committed = {
++                bucket: self.state_count(
++                    schema, fixture["fixture_scope"], bucket
++                )
++                for bucket in (
++                    "staging", "materials", "proposals", "replay"
++                )
++            }
++            self.assertEqual(committed, {
++                "staging": 1,
++                "materials": 1,
++                "proposals": 1,
++                "replay": 1,
++            })
++            killed = self.kill_worker(process)
++        finally:
++            if process.poll() is None:
++                process.kill()
++                process.communicate(timeout=10)
++
++        fresh_ports = self.Ports(fixture)
++        fresh_service = self.pg.create_service(
++            self.connect, schema, fresh_ports
++        )
++        replay = fresh_service.execute(
++            fixture["operation"], fixture["request"]
++        )
++        self.assertEqual(replay["status"], "REPLAY")
++        self.assertEqual(fresh_ports.calls, [])
++        self.assertEqual(
++            self.state_count(
++                schema, fixture["fixture_scope"], "replay"
++            ),
++            1,
++        )
++        print("crash_after_commit", json.dumps({
++            "marker": marker,
++            "committed_before_kill": committed,
++            "worker": killed,
++            "repeat_status": replay["status"],
++            "repeat_calls": fresh_ports.calls,
++        }, ensure_ascii=False, sort_keys=True))
++
++    def test_independent_stop_and_config_sessions_use_scoped_locks(self):
++        fixture = copy.deepcopy(self.fixture)
++
++        stop_schema = self.schema("stop_session")
++        self.setup_control(stop_schema, fixture)
++        stop_process = self.start_worker(
++            stop_schema,
++            "update_state",
++            "b804-stop-session",
++            update="STOPPED",
++        )
++        self.wait_control(stop_schema, "update_committed")
++        self.finish_worker(stop_process)
++        stop_state = self.state_value(
++            stop_schema,
++            fixture["fixture_scope"],
++            "authority",
++            "current",
++        )
++        stop_ports = self.Ports(fixture)
++        stop_result = self.pg.create_service(
++            self.connect, stop_schema, stop_ports
++        ).execute(fixture["operation"], fixture["request"])
++        self.assertEqual(stop_result, {"status": "BLOCKED", "data": {}})
++        self.assertEqual(stop_ports.calls, [])
++        self.assertEqual(stop_state["status"], "STOPPED")
++
++        config_schema = self.schema("config_session")
++        self.setup_control(config_schema, fixture)
++        prepare = self.start_worker(
++            config_schema,
++            "prepare_ordering",
++            "b804-prepare-ordering",
++        )
++        updater = None
++        try:
++            self.wait_control(config_schema, "prepare_after_dispatch")
++            prepare_activity = self.worker_activity(
++                "b804-prepare-ordering"
++            )
++            self.assertTrue(prepare_activity[3])
++            updater = self.start_worker(
++                config_schema,
++                "update_state",
++                "b804-config-updater",
++                update="catalog",
++            )
++            self.wait_control(config_schema, "update_attempt")
++
++            deadline = time.monotonic() + 5
++            update_activity = None
++            while time.monotonic() < deadline:
++                update_activity = self.worker_activity(
++                    "b804-config-updater"
++                )
++                if (
++                    update_activity is not None
++                    and update_activity[1] == "Lock"
++                ):
++                    break
++                time.sleep(0.05)
++            self.assertIsNotNone(update_activity)
++            self.assertEqual(update_activity[1], "Lock")
++            self.assertIsNone(
++                self.control_event(config_schema, "update_committed")
++            )
++            self.assertIsNone(updater.poll())
++            self.assertEqual(
++                self.state_value(
++                    config_schema,
++                    fixture["fixture_scope"],
++                    "catalog",
++                    "current",
++                )["version"],
++                "v1",
++            )
++
++            self.mark_control(config_schema, "release_prepare")
++            prepare_stdout = self.finish_worker(prepare)
++            self.wait_control(config_schema, "update_committed")
++            updater_stdout = self.finish_worker(updater)
++        finally:
++            for process in (prepare, updater):
++                if process is not None and process.poll() is None:
++                    process.kill()
++                    process.communicate(timeout=10)
++
++        final_catalog = self.state_value(
++            config_schema,
++            fixture["fixture_scope"],
++            "catalog",
++            "current",
++        )
++        self.assertEqual(final_catalog, {
++            "version": "v2",
++            "revision": 2,
++        })
++        self.assertEqual(
++            self.state_count(
++                config_schema, fixture["fixture_scope"], "replay"
++            ),
++            1,
++        )
++
++        stale_fixture = copy.deepcopy(fixture)
++        stale_fixture["request"]["request_id"] = "request-after-config"
++        stale_ports = self.Ports(stale_fixture)
++        stale_result = self.pg.create_service(
++            self.connect, config_schema, stale_ports
++        ).execute(stale_fixture["operation"], stale_fixture["request"])
++        self.assertEqual(stale_result, {"status": "STALE", "data": {}})
++        self.assertEqual(stale_ports.calls, [])
++        print("stop_config_sessions", json.dumps({
++            "stop_state": stop_state,
++            "stop_result": stop_result,
++            "prepare_activity": prepare_activity,
++            "updater_wait_activity": update_activity,
++            "prepare_stdout": prepare_stdout.strip(),
++            "updater_stdout": updater_stdout.strip(),
++            "final_catalog": final_catalog,
++            "new_request_status": stale_result["status"],
++        }, ensure_ascii=False, default=str, sort_keys=True))
++
 +
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tests/first_materials_runtime/test_api.py b/tests/first_materials_runtime/test_api.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..eb982e2a687df62a768d53c516174b89eafa175e
+index 0000000000000000000000000000000000000000..2680745ff3dd8a57c4a0dab4686b19c2ebdb3c0d
 --- /dev/null
 +++ b/tests/first_materials_runtime/test_api.py
-@@ -0,0 +1,1349 @@
+@@ -0,0 +1,1479 @@
 +"""Проверки входных данных и прав доступа B8-04."""
 +
 +import unittest
@@ -2570,6 +3165,136 @@ index 0000000000000000000000000000000000000000..eb982e2a687df62a768d53c516174b89
 +        service.ports.transaction = transaction
 +        service.ports.call = call
 +        return service, state, before, calls, transactions
++
++
++class DispatchFinalStateTests(unittest.TestCase):
++    """Изменения через реальные effects выданного ACCEPTANCE_RUNNER.Ports."""
++
++    @classmethod
++    def setUpClass(cls):
++        import json
++        from pathlib import Path
++
++        from ACCEPTANCE_RUNNER import Ports
++
++        root = Path(__file__).resolve().parents[2]
++        fixtures = json.loads(
++            (root / "acceptance" / "fixtures.json").read_text(
++                encoding="utf-8"
++            )
++        )
++        cls.Ports = Ports
++        cls.fixtures = {
++            item["operation"]: item
++            for item in fixtures
++            if item["name"] in {
++                "approved_presentation",
++                "initial_qualification_materials_auto_queue",
++            }
++        }
++
++    def execute_with_dispatch_effect(self, operation, state_effect):
++        import copy
++
++        fixture = copy.deepcopy(self.fixtures[operation])
++        materializer = (
++            "f129.materialize"
++            if operation == "prepare"
++            else "f130.materialize_initial"
++        )
++        fixture["effects"] = {
++            materializer: {
++                "staging": {"current-request": {"written": True}},
++            },
++            "materials.save": {
++                "materials": {"current-request": {"saved": True}},
++            },
++            "dispatch.propose": {
++                "proposals": {"current-request": {"prepared": True}},
++                **state_effect,
++            },
++        }
++        ports = self.Ports(fixture)
++        before = copy.deepcopy(ports.state)
++
++        result = create_service(ports).execute(
++            fixture["operation"], fixture["request"]
++        )
++        return result, ports, before
++
++    def assert_dispatch_rejection(
++        self, operation, state_effect, expected_status
++    ):
++        result, ports, before = self.execute_with_dispatch_effect(
++            operation, state_effect
++        )
++
++        self.assertEqual(result, {
++            "status": expected_status,
++            "data": {},
++        })
++        self.assertEqual(ports.state, before)
++        self.assertEqual(ports.writes, [])
++        self.assertIn(
++            "dispatch.propose", [name for name, _ in ports.calls]
++        )
++        self.assertNotIn("replay", ports.state)
++
++    def test_prepare_dispatch_catalog_change_rolls_back(self):
++        self.assert_dispatch_rejection(
++            "prepare",
++            {"catalog": {"current": {
++                "version": "v2", "revision": 2,
++            }}},
++            "STALE",
++        )
++
++    def test_prepare_initial_dispatch_catalog_change_rolls_back(self):
++        self.assert_dispatch_rejection(
++            "prepare_initial",
++            {"catalog": {"current": {
++                "version": "v2", "revision": 2,
++            }}},
++            "STALE",
++        )
++
++    def test_prepare_dispatch_terminal_authority_rolls_back(self):
++        for status in ("STOPPED", "HUMAN"):
++            with self.subTest(status=status):
++                self.assert_dispatch_rejection(
++                    "prepare",
++                    {"authority": {"current": {
++                        "status": status, "revision": 2,
++                    }}},
++                    "BLOCKED",
++                )
++
++    def test_prepare_initial_dispatch_terminal_authority_rolls_back(self):
++        for status in ("STOPPED", "HUMAN"):
++            with self.subTest(status=status):
++                self.assert_dispatch_rejection(
++                    "prepare_initial",
++                    {"authority": {"current": {
++                        "status": status, "revision": 2,
++                    }}},
++                    "BLOCKED",
++                )
++
++    def test_terminal_authority_wins_over_simultaneous_catalog_change(self):
++        for operation in ("prepare", "prepare_initial"):
++            with self.subTest(operation=operation):
++                self.assert_dispatch_rejection(
++                    operation,
++                    {
++                        "authority": {"current": {
++                            "status": "STOPPED", "revision": 2,
++                        }},
++                        "catalog": {"current": {
++                            "version": "v2", "revision": 2,
++                        }},
++                    },
++                    "BLOCKED",
++                )
 +
 +
 +class RestoringTransaction:

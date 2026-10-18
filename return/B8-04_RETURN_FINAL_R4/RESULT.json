@@ -1,0 +1,40 @@
+{
+  "package": "B8-04",
+  "contract_revision": "R3",
+  "return_revision": "R4",
+  "return_kind": "IMPLEMENTER_FINAL_RETURN",
+  "ready_for_integrator": true,
+  "whole_system_accepted": false,
+  "checks": {
+    "defect_reproduction": {"status": "PASS", "pre_fix_exit_code": 1, "observed_failures": 8},
+    "dispatch_final_state_regression": {"status": "PASS", "exit_code": 0, "test_methods": 5},
+    "unit_discovery": {"status": "PASS", "exit_code": 0, "discovered": 57, "executed_without_dsn": 50, "skipped_without_dsn": 7},
+    "cp0": {"status": "PASS", "exit_code": 0, "protected_files": 140, "mismatches": 0},
+    "cp1": {"status": "PASS", "exit_code": 0, "cases": 19},
+    "cp2": {
+      "status": "PASS",
+      "postgres_tests": 7,
+      "postgres_tests_exit_code": 0,
+      "before_restart_exit_code": 0,
+      "restart_exit_code": 0,
+      "after_restart_exit_code": 0,
+      "same_container": true,
+      "reseeded_after_restart": false,
+      "process_crash_before_commit": "PASS",
+      "process_crash_after_commit": "PASS",
+      "independent_stop_config_sessions": "PASS"
+    },
+    "patch_clean_apply": {"status": "PASS", "exit_code": 0, "matching_files": 7},
+    "cp3": {"status": "NOT_RUN", "owner": "integrator", "required_input": "accepted production owner adapters and shared runtime"},
+    "cp4": {"status": "NOT_RUN", "owner": "independent auditor", "required_input": "installed integrated system and CP3 evidence"}
+  },
+  "external_dependencies": [
+    "accepted production adapters and exact owner behavior for F129/F130/materials/F115",
+    "central shared-runtime integration, roles, backup/restore and production rollback",
+    "independent installed-system audit"
+  ],
+  "secrets_in_return": false,
+  "local_vscode_settings_in_return": false,
+  "git_push_performed": false,
+  "zip_sent": false
+}

@@ -677,10 +677,26 @@ class MaterialsService:
         ) in ("STOPPED", "HUMAN", "HANDED_OFF"):
             raise TransactionResponse("BLOCKED", {})
 
+        if type(current_authority) is not dict:
+            raise TransactionResponse("STALE", {})
+
+        if type(current_catalog) is not dict:
+            raise TransactionResponse("STALE", {})
+
+        # Сравниваем только контрактные поля состояния. STOP/HUMAN выше
+        # проверяются первыми, поэтому безопасность важнее одновременной
+        # смены конфигурации.
         if (
-            current_authority != authority
-            or current_catalog != catalog
-            or type(current_catalog) is not dict
+            current_authority.get("status")
+            != authority.get("status")
+            or current_authority.get("revision")
+            != authority.get("revision")
+            or current_authority.get("catalog_version")
+            != authority.get("catalog_version")
+            or current_catalog.get("version")
+            != catalog.get("version")
+            or current_catalog.get("revision")
+            != catalog.get("revision")
             or current_catalog.get("version")
             != request["catalog_version"]
         ):
@@ -717,6 +733,13 @@ class MaterialsService:
         code = dispatch_response_error(proposed)
         if code is not None:
             raise InvalidPortResponse(code)
+
+        # Dispatch owner тоже может изменить authority/config внутри общей
+        # транзакции. До replay и commit проверяем состояние ещё раз; отказ
+        # выходит исключением и откатывает staging/save/proposal вместе.
+        self._ensure_state_unchanged(
+            tx, authority, catalog, request
+        )
 
         # В повтор кладём описание и исходные идентификаторы, не текст письма.
         tx.put("replay", replay_key(request), {

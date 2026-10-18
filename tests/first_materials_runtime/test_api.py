@@ -1223,6 +1223,136 @@ class MaterialsServiceTests(unittest.TestCase):
         return service, state, before, calls, transactions
 
 
+class DispatchFinalStateTests(unittest.TestCase):
+    """Изменения через реальные effects выданного ACCEPTANCE_RUNNER.Ports."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        from pathlib import Path
+
+        from ACCEPTANCE_RUNNER import Ports
+
+        root = Path(__file__).resolve().parents[2]
+        fixtures = json.loads(
+            (root / "acceptance" / "fixtures.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cls.Ports = Ports
+        cls.fixtures = {
+            item["operation"]: item
+            for item in fixtures
+            if item["name"] in {
+                "approved_presentation",
+                "initial_qualification_materials_auto_queue",
+            }
+        }
+
+    def execute_with_dispatch_effect(self, operation, state_effect):
+        import copy
+
+        fixture = copy.deepcopy(self.fixtures[operation])
+        materializer = (
+            "f129.materialize"
+            if operation == "prepare"
+            else "f130.materialize_initial"
+        )
+        fixture["effects"] = {
+            materializer: {
+                "staging": {"current-request": {"written": True}},
+            },
+            "materials.save": {
+                "materials": {"current-request": {"saved": True}},
+            },
+            "dispatch.propose": {
+                "proposals": {"current-request": {"prepared": True}},
+                **state_effect,
+            },
+        }
+        ports = self.Ports(fixture)
+        before = copy.deepcopy(ports.state)
+
+        result = create_service(ports).execute(
+            fixture["operation"], fixture["request"]
+        )
+        return result, ports, before
+
+    def assert_dispatch_rejection(
+        self, operation, state_effect, expected_status
+    ):
+        result, ports, before = self.execute_with_dispatch_effect(
+            operation, state_effect
+        )
+
+        self.assertEqual(result, {
+            "status": expected_status,
+            "data": {},
+        })
+        self.assertEqual(ports.state, before)
+        self.assertEqual(ports.writes, [])
+        self.assertIn(
+            "dispatch.propose", [name for name, _ in ports.calls]
+        )
+        self.assertNotIn("replay", ports.state)
+
+    def test_prepare_dispatch_catalog_change_rolls_back(self):
+        self.assert_dispatch_rejection(
+            "prepare",
+            {"catalog": {"current": {
+                "version": "v2", "revision": 2,
+            }}},
+            "STALE",
+        )
+
+    def test_prepare_initial_dispatch_catalog_change_rolls_back(self):
+        self.assert_dispatch_rejection(
+            "prepare_initial",
+            {"catalog": {"current": {
+                "version": "v2", "revision": 2,
+            }}},
+            "STALE",
+        )
+
+    def test_prepare_dispatch_terminal_authority_rolls_back(self):
+        for status in ("STOPPED", "HUMAN"):
+            with self.subTest(status=status):
+                self.assert_dispatch_rejection(
+                    "prepare",
+                    {"authority": {"current": {
+                        "status": status, "revision": 2,
+                    }}},
+                    "BLOCKED",
+                )
+
+    def test_prepare_initial_dispatch_terminal_authority_rolls_back(self):
+        for status in ("STOPPED", "HUMAN"):
+            with self.subTest(status=status):
+                self.assert_dispatch_rejection(
+                    "prepare_initial",
+                    {"authority": {"current": {
+                        "status": status, "revision": 2,
+                    }}},
+                    "BLOCKED",
+                )
+
+    def test_terminal_authority_wins_over_simultaneous_catalog_change(self):
+        for operation in ("prepare", "prepare_initial"):
+            with self.subTest(operation=operation):
+                self.assert_dispatch_rejection(
+                    operation,
+                    {
+                        "authority": {"current": {
+                            "status": "STOPPED", "revision": 2,
+                        }},
+                        "catalog": {"current": {
+                            "version": "v2", "revision": 2,
+                        }},
+                    },
+                    "BLOCKED",
+                )
+
+
 class RestoringTransaction:
     """Тестовая транзакция: исключение возвращает прежнее состояние."""
 

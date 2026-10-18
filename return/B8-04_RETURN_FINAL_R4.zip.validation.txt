@@ -1,0 +1,20 @@
+archive=B8-04_RETURN_FINAL_R4.zip
+absolute_path=C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\return\B8-04_RETURN_FINAL_R4.zip
+size_bytes=68919
+sha256=1fbdbd1fbbe5385aaaa107d01e2f8373ea421e41dd8e9a1001f3ec1b857a2071
+zip_root_entries_after_clean_extract=1
+zip_root_name=B8-04_RETURN_FINAL_R4
+manifest_entries=40
+payload_files=40
+manifest_mismatches=0
+unsafe_or_excluded_entries=0
+unpacked_patch_check_exit=0
+unpacked_patch_apply_exit=0
+unpacked_patch_file_mismatches=0
+unpacked_unit_exit=0
+unpacked_unit_result=57 discovered; 50 run; 7 skipped without DSN
+unpacked_cp1_exit=0
+unpacked_cp1_pass_count=19
+
+Validation used a fresh extraction and a new protected-base directory. The
+patch taken from the extracted archive was applied there before unit/CP1.

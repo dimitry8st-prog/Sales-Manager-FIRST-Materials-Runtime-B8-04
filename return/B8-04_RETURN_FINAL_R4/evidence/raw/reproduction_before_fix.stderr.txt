@@ -1,0 +1,140 @@
+test_prepare_dispatch_catalog_change_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_catalog_change_rolls_back) ... FAIL
+test_prepare_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) ... 
+  test_prepare_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) (status='STOPPED') ... FAIL
+  test_prepare_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) (status='HUMAN') ... FAIL
+test_prepare_initial_dispatch_catalog_change_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_catalog_change_rolls_back) ... FAIL
+test_prepare_initial_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) ... 
+  test_prepare_initial_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) (status='STOPPED') ... FAIL
+  test_prepare_initial_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) (status='HUMAN') ... FAIL
+test_terminal_authority_wins_over_simultaneous_catalog_change (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) ... 
+  test_terminal_authority_wins_over_simultaneous_catalog_change (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) (operation='prepare') ... FAIL
+  test_terminal_authority_wins_over_simultaneous_catalog_change (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) (operation='prepare_initial') ... FAIL
+
+======================================================================
+FAIL: test_prepare_dispatch_catalog_change_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_catalog_change_rolls_back)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1300, in test_prepare_dispatch_catalog_change_rolls_back
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'request-a', [50 chars]v1'}} != {'status': 'STALE', 'data': {}}
++ {'data': {}, 'status': 'STALE'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-a',
+-           'request_id': 'request-a'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_prepare_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) (status='STOPPED')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1320, in test_prepare_dispatch_terminal_authority_rolls_back
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'request-a', [50 chars]v1'}} != {'status': 'BLOCKED', 'data': {}}
++ {'data': {}, 'status': 'BLOCKED'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-a',
+-           'request_id': 'request-a'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_prepare_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) (status='HUMAN')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1320, in test_prepare_dispatch_terminal_authority_rolls_back
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'request-a', [50 chars]v1'}} != {'status': 'BLOCKED', 'data': {}}
++ {'data': {}, 'status': 'BLOCKED'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-a',
+-           'request_id': 'request-a'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_prepare_initial_dispatch_catalog_change_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_catalog_change_rolls_back)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1309, in test_prepare_initial_dispatch_catalog_change_rolls_back
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'initial-a', [96 chars]ON'}} != {'status': 'STALE', 'data': {}}
++ {'data': {}, 'status': 'STALE'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-initial',
+-           'request_id': 'initial-a',
+-           'verdict': 'QUALIFIED_FOR_PREPARATION'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_prepare_initial_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) (status='STOPPED')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1331, in test_prepare_initial_dispatch_terminal_authority_rolls_back
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'initial-a', [96 chars]ON'}} != {'status': 'BLOCKED', 'data': {}}
++ {'data': {}, 'status': 'BLOCKED'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-initial',
+-           'request_id': 'initial-a',
+-           'verdict': 'QUALIFIED_FOR_PREPARATION'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_prepare_initial_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) (status='HUMAN')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1331, in test_prepare_initial_dispatch_terminal_authority_rolls_back
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'initial-a', [96 chars]ON'}} != {'status': 'BLOCKED', 'data': {}}
++ {'data': {}, 'status': 'BLOCKED'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-initial',
+-           'request_id': 'initial-a',
+-           'verdict': 'QUALIFIED_FOR_PREPARATION'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_terminal_authority_wins_over_simultaneous_catalog_change (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) (operation='prepare')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1342, in test_terminal_authority_wins_over_simultaneous_catalog_change
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'request-a', [50 chars]v1'}} != {'status': 'BLOCKED', 'data': {}}
++ {'data': {}, 'status': 'BLOCKED'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-a',
+-           'request_id': 'request-a'},
+-  'status': 'OK'}
+
+======================================================================
+FAIL: test_terminal_authority_wins_over_simultaneous_catalog_change (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) (operation='prepare_initial')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1342, in test_terminal_authority_wins_over_simultaneous_catalog_change
+    self.assert_dispatch_rejection(
+  File "C:\Users\user\Desktop\СТАЖЁР\B8-04_R3\tests\first_materials_runtime\test_api.py", line 1288, in assert_dispatch_rejection
+    self.assertEqual(result, {
+AssertionError: {'status': 'OK', 'data': {'request_id': 'initial-a', [96 chars]ON'}} != {'status': 'BLOCKED', 'data': {}}
++ {'data': {}, 'status': 'BLOCKED'}
+- {'data': {'catalog_version': 'v1',
+-           'material_ref': 'material-initial',
+-           'request_id': 'initial-a',
+-           'verdict': 'QUALIFIED_FOR_PREPARATION'},
+-  'status': 'OK'}
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.087s
+
+FAILED (failures=8)

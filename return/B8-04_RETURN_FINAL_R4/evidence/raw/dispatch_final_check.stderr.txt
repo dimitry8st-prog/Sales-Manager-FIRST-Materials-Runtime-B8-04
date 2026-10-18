@@ -1,0 +1,10 @@
+test_prepare_dispatch_catalog_change_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_catalog_change_rolls_back) ... ok
+test_prepare_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_dispatch_terminal_authority_rolls_back) ... ok
+test_prepare_initial_dispatch_catalog_change_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_catalog_change_rolls_back) ... ok
+test_prepare_initial_dispatch_terminal_authority_rolls_back (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_prepare_initial_dispatch_terminal_authority_rolls_back) ... ok
+test_terminal_authority_wins_over_simultaneous_catalog_change (tests.first_materials_runtime.test_api.DispatchFinalStateTests.test_terminal_authority_wins_over_simultaneous_catalog_change) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.095s
+
+OK

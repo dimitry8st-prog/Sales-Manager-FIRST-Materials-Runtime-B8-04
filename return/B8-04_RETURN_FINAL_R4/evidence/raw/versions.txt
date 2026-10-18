@@ -1,0 +1,8 @@
+os=Microsoft Windows NT 10.0.26300.0
+powershell=5.1.26100.9711
+Python 3.12.13
+psycopg=3.3.6
+uv 0.11.29 (901092ee1 2026-07-15 x86_64-pc-windows-msvc)
+git version 2.56.0.windows.2
+Docker version 29.6.1, build 8900f1d
+postgres (PostgreSQL) 16.15 (Debian 16.15-1.pgdg13+2)

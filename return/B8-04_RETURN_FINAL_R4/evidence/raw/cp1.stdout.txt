@@ -1,0 +1,20 @@
+PASS unauthenticated
+PASS wrong_client
+PASS missing_capability
+PASS unknown_request_field
+PASS approved_presentation
+PASS missing_f129
+PASS blocked_STOPPED
+PASS blocked_HUMAN
+PASS same_request_id_other_catalog_conflict
+PASS invalid_before_auth
+PASS initial_qualification_materials_auto_queue
+PASS initial_needs_review_no_offer
+PASS approved_product_info
+PASS unapproved_catalog
+PASS noninformational_interest
+PASS incomplete_event
+PASS foreign_event_identity
+PASS save_ref_changed
+PASS initial_not_qualified
+CP1 SYNTHETIC COMPONENT CASES PASS; real PG/installed gates NOT_RUN

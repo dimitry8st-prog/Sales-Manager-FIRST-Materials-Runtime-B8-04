@@ -1,0 +1,19 @@
+phase=before_restart
+container_name=b8-04-r4-cp2
+container_id=109e8c6c9b18eb4f494bd20a2a48dffb356c9499eba5a4b4355e95a96a8d92ab
+docker_started_at=2026-10-17T21:23:31.141005446Z
+pg_postmaster_start_time=2026-10-17 21:23:35.121917+00
+
+command=docker restart b8-04-r4-cp2
+exit_code=0
+stdout=b8-04-r4-cp2
+
+phase=after_restart
+container_name=b8-04-r4-cp2
+container_id=109e8c6c9b18eb4f494bd20a2a48dffb356c9499eba5a4b4355e95a96a8d92ab
+docker_started_at=2026-10-18T04:10:55.229539927Z
+pg_postmaster_start_time=2026-10-18 04:10:56.503356+00
+
+The unchanged container ID and increased postmaster start time prove a real
+restart of the same disposable PostgreSQL. PG_GATE after_restart used the
+same b8_accept_b804r4gate schema and did not call seed.
